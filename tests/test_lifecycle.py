@@ -59,6 +59,30 @@ def test_activation_rejects_wrong_token(app, tmp_path):
         server.close()
 
 
+def test_server_close_releases_idle_connections_and_is_idempotent(app, tmp_path):
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtNetwork import QLocalSocket
+    from shiboken6 import isValid
+    server = InstanceServer(tmp_path)
+    client = QLocalSocket()
+    client.connectToServer(server.name)
+    assert client.waitForConnected(500)
+    deadline = time.monotonic() + 2
+    while not server.connections and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert server.connections
+    connection = next(iter(server.connections))
+    server.close()
+    server.close()
+    assert not server.connections and not server.path.exists()
+    assert not connection.timer.isActive()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(connection) and not isValid(server)
+    server.close()
+    client.abort()
+
+
 def test_hidden_window_returns_and_tray_loss_has_visible_fallback(app, tmp_path, monkeypatch):
     monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", lambda: True)
     window = MainWindow(AppConfig(close_to_tray=True), ConfigManager(tmp_path / "config.json"),

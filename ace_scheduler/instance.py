@@ -20,6 +20,7 @@ class InstanceServer(QObject):
         self.server.setMaxPendingConnections(8)
         self.server.newConnection.connect(self._accept)
         self.connections = set()
+        self.closed = False
         if not self.server.listen(self.name):
             raise OSError(self.server.errorString())
         try:
@@ -41,14 +42,18 @@ class InstanceServer(QObject):
             connection.read()
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
         for connection in tuple(self.connections):
-            connection.socket.abort()
+            connection.expire()
         self.server.close()
         try:
             if json.loads(self.path.read_text(encoding="utf-8")).get("token") == self.token:
                 self.path.unlink(missing_ok=True)
         except (OSError, ValueError):
             pass
+        self.deleteLater()
 
 
 class ActivationConnection(QObject):
@@ -57,6 +62,7 @@ class ActivationConnection(QObject):
         self.owner = owner
         self.socket = socket
         self.acknowledged = False
+        self.dropped = False
         socket.setParent(self)
         socket.setReadBufferSize(256)
         socket.readyRead.connect(self.read)
@@ -73,6 +79,9 @@ class ActivationConnection(QObject):
 
     @Slot()
     def drop(self):
+        if self.dropped:
+            return
+        self.dropped = True
         self.timer.stop()
         self.owner.connections.discard(self)
         self.deleteLater()
