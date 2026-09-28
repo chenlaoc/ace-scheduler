@@ -31,6 +31,8 @@ class MainWindow(FramelessMainWindow):
     restore_many_requested = Signal(object)
     restore_requested = Signal(object)
     stop_requested = Signal()
+    force_restore_requested = Signal()
+    abandon_requested = Signal()
 
     def __init__(self, config, manager, read_only=False, start_worker=True):
         super().__init__()
@@ -49,6 +51,7 @@ class MainWindow(FramelessMainWindow):
         self.close_after_command = False
         self.shutting_down = False
         self.allow_close = False
+        self.close_dialog_active = False
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
         self.resize(1280, 860)
@@ -58,7 +61,7 @@ class MainWindow(FramelessMainWindow):
             self.restoreGeometry(QByteArray.fromBase64(config.geometry.encode("ascii", errors="ignore")))
         if start_worker:
             self.thread = QThread(self)
-            self.worker = MonitorWorker(copy.deepcopy(config))
+            self.worker = MonitorWorker(copy.deepcopy(config), manager.path.with_name("recovery.json"), read_only)
             self.worker.moveToThread(self.thread)
             self.thread.started.connect(self.worker.start)
             self.worker.ready.connect(self.on_ready)
@@ -72,7 +75,11 @@ class MainWindow(FramelessMainWindow):
             self.stop_many_requested.connect(self.worker.stop_rules)
             self.restore_many_requested.connect(self.worker.restore_rules)
             self.restore_requested.connect(self.worker.restore)
-            self.stop_requested.connect(self.worker.stop)
+            self.stop_requested.connect(self.worker.finish_session)
+            self.force_restore_requested.connect(self.worker.force_restore)
+            self.abandon_requested.connect(self.worker.abandon_recovery)
+            self.worker.recovery_notice.connect(self.on_recovery_notice)
+            self.worker.finish_failed.connect(self.on_finish_failed)
             self.thread.finished.connect(self.worker.deleteLater)
             self.thread.finished.connect(self._thread_finished)
             self.thread.start()
@@ -239,6 +246,34 @@ class MainWindow(FramelessMainWindow):
         self.policy_page.refresh_status()
         self.restore_requested.emit(None)
 
+    @Slot(str)
+    def on_recovery_notice(self, message):
+        self.banner.setText(message)
+        self.settings_page.recovery_status.setText(message)
+
+    @Slot(str)
+    def on_finish_failed(self, message):
+        self.shutting_down = False
+        self.setEnabled(True)
+        self.banner.setText(message)
+        self.policy_page.refresh_status()
+        QMessageBox.warning(self, "退出未完成", message)
+
+    def resolve_recovery(self, force=False):
+        if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
+            return
+        message = ("将对仍属于原实例的记录恢复原值，包括被外部修改或写入未确认的字段。确认覆盖？" if force else
+                   "将停止全部规则、保留当前调度值，并归档所有恢复记录（包括损坏记录）。之后不能再用这些记录恢复。")
+        if QMessageBox.question(self, "处理恢复记录", message) != QMessageBox.StandardButton.Yes:
+            return
+        self.pending_commands += 1
+        self.policy_page.refresh_status()
+        if force:
+            self.pending_restore = True
+            self.force_restore_requested.emit()
+        else:
+            self.abandon_requested.emit()
+
     @Slot(object, object, int)
     def on_snapshot(self, rows, armed, originals):
         self.armed, self.restore_count = armed, originals
@@ -377,13 +412,13 @@ class MainWindow(FramelessMainWindow):
             event.accept()
             return
         event.ignore()
-        if self.pending_close or self.shutting_down:
+        if self.pending_close or self.shutting_down or self.close_dialog_active:
             return
         if self.pending_commands:
             self.close_after_command = True
             self.banner.setText("等待正在执行的应用操作完成后退出…")
             return
-        if self.restore_count or self.armed:
+        if not self.read_only and (self.restore_count or self.armed):
             box = QMessageBox(self)
             box.setWindowTitle("退出 " + APP_NAME)
             box.setText("本会话修改过的进程仍在运行。请选择退出时如何处理调度设置。")
@@ -391,7 +426,11 @@ class MainWindow(FramelessMainWindow):
             keep = box.addButton("保留当前设置并退出", QMessageBox.ButtonRole.DestructiveRole)
             box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
             box.setDefaultButton(restore)
-            box.exec()
+            self.close_dialog_active = True
+            try:
+                box.exec()
+            finally:
+                self.close_dialog_active = False
             if box.clickedButton() == restore:
                 self.pending_close = True
                 self.policy_page.refresh_status()

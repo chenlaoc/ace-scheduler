@@ -6,6 +6,8 @@ from typing import Protocol
 from ace_scheduler.config.models import Policy, PRIORITIES
 from .cpu_topology import CpuTopology
 from .process_metrics import ProcessIdentity
+from .recovery import decode
+from ace_scheduler.windows.eco_qos import EcoState
 
 
 class SchedulingExtension(Protocol):
@@ -53,10 +55,11 @@ class ApplyResult:
 
 
 class Scheduler:
-    def __init__(self, api, topology: CpuTopology):
+    def __init__(self, api, topology: CpuTopology, journal=None):
         self.api = api
         self.topology = topology
-        self.originals: dict[ProcessIdentity, dict[str, object]] = {}
+        self.journal = journal
+        self.originals: dict[ProcessIdentity, dict[str, object]] = journal.originals if journal else {}
 
     def inspect(self, identity: ProcessIdentity) -> ScheduleState:
         state = ScheduleState()
@@ -96,13 +99,13 @@ class Scheduler:
             result.operations.append(Operation("affinity", True, "跳过：" + self.topology.limitation))
         return result
 
-    def restore(self, identity: ProcessIdentity) -> ApplyResult:
+    def restore(self, identity: ProcessIdentity, force=False) -> ApplyResult:
         targets = self.originals.get(identity, {}).copy()
         if not targets:
             return ApplyResult([Operation("恢复", True, "本会话没有已保存的原设置")])
-        return self._set(identity, targets, restore=True)
+        return self._set(identity, targets, restore=True, force=force)
 
-    def _set(self, identity, targets, restore: bool) -> ApplyResult:
+    def _set(self, identity, targets, restore: bool, force=False) -> ApplyResult:
         operations = []
         try:
             with self.api.open(identity, write=True) as handle:
@@ -110,16 +113,30 @@ class Scheduler:
                     try:
                         current = getattr(self.api, "get_" + name)(handle)
                         changed = not self.matches(name, current, target)
+                        if name == "affinity" and not self.topology.affinity_supported:
+                            raise RuntimeError("当前拓扑不支持恢复 Affinity")
+                        if restore and changed and self.journal and not force:
+                            entry = self.journal.entry(identity, name)
+                            if not entry or entry["pending"] or not self.matches(name, current, decode(name, entry["last"])):
+                                raise RuntimeError("恢复冲突：当前值被外部修改或上次写入未确认；请保留现值或明确覆盖恢复")
                         if changed:
                             if not restore:
+                                if self.journal:
+                                    saved_target = EcoState(1, int(target)) if name == "eco" and isinstance(target, bool) else target
+                                    decode(name, current.__dict__ if isinstance(current, EcoState) else current)
+                                    self.journal.prepare(identity, name, current, saved_target)
                                 self.originals.setdefault(identity, {}).setdefault(name, current)
                             getattr(self.api, "set_" + name)(handle, target)
                             actual = getattr(self.api, "get_" + name)(handle)
                             if not self.matches(name, actual, target):
                                 raise RuntimeError(f"回读不一致：{actual!r}")
-                        operations.append(Operation(name, True, f"-> {target!r} OK" + ("" if changed else "（已符合）"), changed))
+                            if not restore and self.journal:
+                                self.journal.confirm(identity, name, actual)
                         if restore:
+                            if self.journal:
+                                self.journal.remove(identity, name)
                             self.originals[identity].pop(name, None)
+                        operations.append(Operation(name, True, f"-> {target!r} OK" + ("" if changed else "（已符合）"), changed))
                     except (OSError, RuntimeError, ValueError) as exc:
                         operations.append(Operation(name, False, error_text(exc)))
         except (OSError, RuntimeError, ValueError) as exc:
@@ -129,4 +146,11 @@ class Scheduler:
         return ApplyResult(operations)
 
     def retain(self, identities: set[ProcessIdentity]) -> None:
+        if self.journal:
+            self.journal.retain(identities)
         self.originals = {key: value for key, value in self.originals.items() if key in identities}
+
+    def abandon(self):
+        if self.journal:
+            self.journal.abandon()
+        self.originals.clear()

@@ -69,7 +69,7 @@ class MonitorEngine:
                 self.outcomes.pop(identity, None)
         self.log(f"{key} 已停止自动应用；现有调度值保留，可点击恢复原设置")
 
-    def restore(self, key: str | None = None) -> bool:
+    def restore(self, key: str | None = None, force=False) -> bool:
         if key is None:
             self.armed.clear()
         else:
@@ -78,7 +78,7 @@ class MonitorEngine:
         for identity in list(self.scheduler.originals):
             if key is not None and identity.name.casefold() != key:
                 continue
-            result = self.scheduler.restore(identity)
+            result = self.scheduler.restore(identity, force=force)
             success = result.ok and success
             self.outcomes[identity] = "已恢复原设置" if result.ok else result.status
             for operation in result.operations:
@@ -215,13 +215,17 @@ class MonitorWorker(QObject):
     applied = Signal(object, float, str)
     restore_done = Signal(bool)
     command_done = Signal()
+    recovery_notice = Signal(str)
+    finish_failed = Signal(str)
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, recovery_path=None, read_only=False):
         super().__init__()
         self.config = config
         self.engine = None
         self.monitor_timer = None
         self.enforce_timer = None
+        self.recovery_path = recovery_path
+        self.read_only = read_only
 
     def _log(self, message):
         logging.getLogger("ace_scheduler").info(message)
@@ -231,9 +235,14 @@ class MonitorWorker(QObject):
     def start(self):
         try:
             from ace_scheduler.windows.process_api import WindowsProcessApi
+            from .recovery import RecoveryJournal
             topology = CpuTopology.detect()
-            self.engine = MonitorEngine(Scheduler(WindowsProcessApi(), topology), self.config,
+            journal = RecoveryJournal(self.recovery_path) if self.recovery_path else None
+            self.engine = MonitorEngine(Scheduler(WindowsProcessApi(), topology, journal), self.config,
                                         self._log, self.applied.emit)
+            if journal and journal.warning:
+                self._log(journal.warning)
+                self.recovery_notice.emit(journal.warning)
             self.monitor_timer = QTimer(self)
             self.monitor_timer.timeout.connect(self.scan)
             self.enforce_timer = QTimer(self)
@@ -298,6 +307,9 @@ class MonitorWorker(QObject):
     def _batch(self, kind, keys):
         """Queue one operation and scan once for the whole set, not once per rule."""
         try:
+            if self.read_only:
+                self._log("只读模式，操作未执行")
+                return
             if not self.engine:
                 self._log("后台尚未就绪，批量操作未执行")
                 return
@@ -330,8 +342,17 @@ class MonitorWorker(QObject):
 
     @Slot(object)
     def restore(self, key):
+        self._restore(key)
+
+    @Slot()
+    def force_restore(self):
+        self._restore(None, force=True)
+
+    def _restore(self, key, force=False):
         ok = False
         try:
+            if self.read_only:
+                return
             if not self.engine:
                 self._log("后台尚未就绪，恢复未执行")
                 return
@@ -341,13 +362,40 @@ class MonitorWorker(QObject):
             else:
                 self.engine.armed.pop(key, None)
             self.scan()
-            ok = self.engine.restore(key)
+            ok = self.engine.restore(key, force=True) if force else self.engine.restore(key)
             self.scan()
         except Exception as exc:
             self._log(f"恢复失败：{error_text(exc)}")
             logging.getLogger("ace_scheduler").exception("Restore operation")
         finally:
             self.restore_done.emit(ok)
+
+    @Slot()
+    def abandon_recovery(self):
+        try:
+            if self.read_only:
+                return
+            if self.engine:
+                self.engine.armed.clear()
+                self.engine.scheduler.abandon()
+                self._publish()
+                self.recovery_notice.emit("已保留当前调度值，恢复记录已归档。")
+        except Exception as exc:
+            self.recovery_notice.emit("归档恢复记录失败：" + error_text(exc))
+        finally:
+            self.command_done.emit()
+
+    @Slot()
+    def finish_session(self):
+        try:
+            if self.engine and not self.read_only:
+                self.engine.armed.clear()
+                journal = self.engine.scheduler.journal
+                if not journal or not journal.blocked:
+                    self.engine.scheduler.abandon()
+            self.stop()
+        except Exception as exc:
+            self.finish_failed.emit("保存退出决定失败，仍保留恢复记录：" + error_text(exc))
 
     @Slot()
     def stop(self):
