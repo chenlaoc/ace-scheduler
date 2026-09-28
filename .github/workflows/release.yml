@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag, e.g. v1.4.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify and create draft
+    runs-on: windows-latest
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+      - run: python -m pip install -r requirements-lock.txt
+      - run: python -m tools.validate_release --tag "$env:RELEASE_TAG"
+      - run: python -m pytest -q --junitxml=artifacts/tests.xml
+      - run: python -m PyInstaller --noconfirm ace_scheduler.spec
+      - run: python -m tools.package_release
+      - name: Create draft release with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $assets = Get-ChildItem -Path dist/ACE-Scheduler-v*-x64.zip* -File | ForEach-Object { $_.FullName }
+          gh release create "$env:RELEASE_TAG" @assets --verify-tag --draft --title "ACE Scheduler $env:RELEASE_TAG" --notes-file dist/release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-verification
+          path: |
+            artifacts/tests.xml
+            artifacts/release-smoke/
+          if-no-files-found: warn
+          retention-days: 30

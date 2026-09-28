@@ -1,0 +1,3 @@
+# QtCore/QtGui/QtWidgets only; this is the official minimal PySide6 distribution.
+PySide6-Essentials>=6.8,<7
+psutil>=6.1,<8

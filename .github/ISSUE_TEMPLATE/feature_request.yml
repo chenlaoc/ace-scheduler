@@ -1,0 +1,29 @@
+name: 功能建议
+description: 描述使用场景与希望解决的问题
+title: '[Feature] '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 当前遇到什么问题
+      description: 请先描述真实操作场景。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望的行为
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已尝试的方式与限制
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 项目范围
+      options:
+        - label: 建议属于正常用户态调度、监控或界面体验，不涉及驱动、注入或绕过保护。
+          required: true

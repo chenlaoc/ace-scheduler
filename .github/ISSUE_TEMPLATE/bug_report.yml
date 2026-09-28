@@ -1,0 +1,50 @@
+name: 错误报告
+description: 提交可复现的界面、调度或配置问题
+title: '[Bug] '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请使用临时测试进程复现调度问题，并删除日志中的个人路径和敏感信息。安全漏洞按 SECURITY.md 私密报告。
+  - type: input
+    id: version
+    attributes:
+      label: ACE Scheduler 版本
+      placeholder: 1.4.0 或提交 SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Windows / CPU / 显示缩放
+      placeholder: Windows 11 构建号，逻辑 CPU 数，100% / 150%
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行模式
+      options:
+        - 只读监控
+        - 常规模式（管理员）
+        - 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现步骤
+      description: 写清在哪个页面、勾选范围、具体操作以及是否每次发生。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏日志或截图
+      description: 粘贴必要片段即可，不上传完整用户配置或第三方程序。

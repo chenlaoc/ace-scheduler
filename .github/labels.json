@@ -1,0 +1,12 @@
+[
+  {"name":"bug","color":"d73a4a","description":"可复现的错误"},
+  {"name":"enhancement","color":"a2eeef","description":"功能或体验改进"},
+  {"name":"documentation","color":"0075ca","description":"文档与说明"},
+  {"name":"dependencies","color":"0366d6","description":"依赖与 Actions 更新"},
+  {"name":"area: ui","color":"8b5cf6","description":"页面、窗口和交互"},
+  {"name":"area: scheduler","color":"008672","description":"调度、回读和恢复"},
+  {"name":"area: config","color":"c5def5","description":"规则与配置持久化"},
+  {"name":"area: build","color":"bfd4f2","description":"打包、CI 与发布"},
+  {"name":"priority: high","color":"b60205","description":"数据或恢复正确性等高影响问题"},
+  {"name":"needs reproduction","color":"fbca04","description":"需要更多复现信息"}
+]

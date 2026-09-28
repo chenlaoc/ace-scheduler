@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用与恢复说明
+    url: https://github.com/chenlaoc/ace-scheduler/blob/main/docs/USER_GUIDE.md
+    about: 先检查策略语义、数据口径和已知限制。
+  - name: 安全问题
+    url: https://github.com/chenlaoc/ace-scheduler/blob/main/SECURITY.md
+    about: 查看私密报告渠道，避免在普通问题中泄露敏感信息。
