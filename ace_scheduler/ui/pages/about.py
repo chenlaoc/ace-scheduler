@@ -18,7 +18,7 @@ class AboutPage(Page):
         self.build = label("构建 " + info["commit"][:12] + (" · 含未提交改动" if info["dirty"] else ""), "muted", True)
         product.body.addWidget(self.build)
         product.body.addWidget(label("用于调整 Windows 用户态进程的 CPU 调度。启动后先观察，由你选择何时应用或恢复设置。", "body", True))
-        product.body.addWidget(label("可在私有仓库的发行页面查看新版本，需要仓库访问权限。程序不会自动更新，目前也没有代码签名。", "muted", True))
+        product.body.addWidget(label("可在 GitHub 发行页面查看新版本。程序不会自动更新，目前也没有代码签名。", "muted", True))
         links = QHBoxLayout()
         for title, url in (("查看发行版本", "https://github.com/chenlaoc/ace-scheduler/releases"),
                            ("反馈问题", "https://github.com/chenlaoc/ace-scheduler/issues")):

@@ -1,6 +1,6 @@
 # 参与 ACE Scheduler
 
-仓库目前为私有维护。请先取得访问与贡献授权，提交前阅读 [使用指南](docs/USER_GUIDE.md) 和 [架构文档](docs/ARCHITECTURE.md)。
+欢迎通过 Issue 反馈问题或提出建议。仓库公开可见，但尚未采用开源许可证；代码贡献请先与维护者确认授权与范围，并阅读 [使用指南](docs/USER_GUIDE.md) 和 [架构文档](docs/ARCHITECTURE.md)。
 
 ## 一次改动的流程
 
@@ -8,7 +8,9 @@
 2. 从 `main` 创建短分支，如 `fix/restore-error` 或 `feat/policy-search`。自动协作分支使用 `codex/` 前缀。
 3. 保持改动集中；UI 不直接调用进程 API，调度操作留在工作线程。
 4. 运行相关测试及完整 Windows 回归，填写 PR 模板中的验证结果。
-5. 等待 CI 通过、讨论解决后，使用 squash merge 合并。
+5. 等待 CI 通过、分支跟上最新 `main`、讨论解决后，使用 squash merge 合并。`main` 的保护规则也适用于管理员，禁止直接推送、强制推送和删除。
+
+目前由一名维护者管理，不强制要求另一位审核者批准；PR、CI 与讨论解决仍是合并条件。外部贡献者的 Actions 运行需由维护者批准，批准前应检查工作流和构建脚本。
 
 ## 不可破坏的行为
 

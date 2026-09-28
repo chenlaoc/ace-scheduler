@@ -36,7 +36,7 @@ ACE Scheduler 可以查看 Windows **用户态进程**的资源占用，调整 C
 | **调度策略** | 直接逐行修改，或勾选多行统一设置 Priority、CPU Affinity、EcoQoS 与维护方式 |
 | **实验对照** | 保留应用前的数据，与应用后最近 60 秒比较，导出 CSV |
 | **设置与日志** | 设置采样间隔和关闭方式，恢复异常退出前的设置，重启后台或导出脱敏诊断 |
-| **关于** | 查看版本、构建信息和许可，打开配置目录，前往私有仓库查看更新或反馈问题 |
+| **关于** | 查看版本、构建信息和许可，打开配置目录，前往 GitHub 查看更新或反馈问题 |
 
 ![批量调度策略](docs/images/policy.png)
 
@@ -68,7 +68,7 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m ace_scheduler --monitor-only
 ```
 
-仓库是私有的，克隆与下载需要仓库访问权限。开发环境、构建命令和模块说明见 [开发指南](docs/DEVELOPMENT.md)。
+开发环境、构建命令和模块说明见 [开发指南](docs/DEVELOPMENT.md)。
 
 ## 调度方式
 
@@ -115,4 +115,4 @@ Windows CI 在 Python 3.11 / 3.13 上运行测试，并单独构建 EXE、验证
 - [安全问题报告](SECURITY.md) · [维护与发布](docs/RELEASING.md) · [路线图](docs/ROADMAP.md)
 - [品牌资产与生成记录](docs/BRANDING.md) · [第三方声明](THIRD_PARTY_NOTICES.md)
 
-项目由 [@chenlaoc](https://github.com/chenlaoc) 维护，当前为私有项目，原始项目代码与品牌保留全部权利；访问仓库不等同于获得再分发许可。第三方组件按各自许可使用，详见 [LICENSE](LICENSE)。
+项目由 [@chenlaoc](https://github.com/chenlaoc) 维护。仓库公开供查看，尚未采用开源许可证；原始项目代码、文档与品牌保留全部权利，使用或再分发前请确认授权。第三方组件按各自许可使用，详见 [LICENSE](LICENSE)。
