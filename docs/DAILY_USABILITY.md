@@ -37,3 +37,11 @@
 关于页面可离线查看版本、构建、许可声明和配置位置；只有明确点击时才打开私有 GitHub Releases/Issues 或本地目录。更新入口是浏览器链接，没有自动更新、开机启动或签名承诺。
 
 v1.5.0 Python 常量、Windows 版本资源、README 和 CHANGELOG 已同步。本地完整回归、只读启动和 100%/150% 原生窗口命中/缩放检查已执行；真实 Windows 托盘验证确认可用、隐藏后找回和真正退出。证据分别在 `artifacts/daily-tests.xml`、`artifacts/daily-smoke`、`artifacts/daily-window-*`、`artifacts/daily-tray-native` 和 `artifacts/daily-preview`。Qt 缩放测试不代表物理多屏 DPI 热切换。
+
+## 最终回归与交付
+
+本地 Windows 完整回归 **145 项通过、0 跳过**。最终复核补充了损坏记录不能报告恢复成功、后台失败仍可保留退出、普通启动不请求 UAC、交接失败后的原线程重启、无效接管确认回退，以及放弃本地记录/应用全部停用项不触发 UAC。
+
+GUI 截图使用显式标注的模拟数据，没有操作截图中命名的真实进程：[设置 1280×860](images/v1.5-settings.png)、[设置 1040×700](images/v1.5-settings-compact.png)、[关于页面](images/v1.5-about.png)。真实调度写入始终限定测试自行创建的协作进程 PID。
+
+独立 PyInstaller onedir 构建和便携 ZIP 启动验收核对五个页面、诊断 ZIP 版本以及 EXE 的 FileVersion / ProductVersion。构建保持 asInvoker，由运行时按需请求 UAC；没有发布标签、Release 或修改仓库可见性。安全桌面 UAC、Explorer 重启、睡眠/唤醒及物理多屏 DPI 仍列为人工环境验收边界，不计入自动测试通过范围。
