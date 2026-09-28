@@ -5,6 +5,7 @@ from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QComboBox, QHBoxLayout,
                                QLineEdit, QMainWindow, QWidget)
+from .theme import is_dark
 
 
 class CaptionButton(QAbstractButton):
@@ -29,11 +30,12 @@ class CaptionButton(QAbstractButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         hovered = self.underMouse() or self.isDown()
         close_hover = hovered and self.kind == "close"
-        background = QColor("#d83146" if self.isDown() else "#e34a5c") if close_hover else QColor(255, 255, 255, 210 if hovered else 110)
+        dark = is_dark(self)
+        background = QColor("#d83146" if self.isDown() else "#e34a5c") if close_hover else (QColor(58, 79, 107, 230 if hovered else 160) if dark else QColor(255, 255, 255, 210 if hovered else 110))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(background)
         painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 10, 10)
-        color = QColor("white" if close_hover else "#536b87" if self.isEnabled() else "#a1adbd")
+        color = QColor("white" if close_hover else ("#c1d4ec" if dark else "#536b87") if self.isEnabled() else "#8192ab")
         painter.setPen(QPen(color, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         if self.kind == "minimize":

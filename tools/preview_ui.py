@@ -25,11 +25,13 @@ from ace_scheduler.windows.eco_qos import EcoState
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("artifacts/preview"))
-    folder = parser.parse_args().output
+    parser.add_argument("--theme", choices=("system", "light", "dark"), default="system")
+    args = parser.parse_args()
+    folder = args.output
     folder.mkdir(parents=True, exist_ok=True)
     app = QApplication([])
     apply_palette(app)
-    window = MainWindow(AppConfig(), ConfigManager(folder / "config.json"), start_worker=False)
+    window = MainWindow(AppConfig(theme=args.theme), ConfigManager(folder / "config.json"), start_worker=False)
     window.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
     topology = CpuTopology.detect()
     window.on_ready(topology)
@@ -56,11 +58,15 @@ def main():
     window.policy_page.set_preset(("ace-tray.exe",), "Mild")
     window.resize(1280, 860)
     window.show()
-    for index, name in enumerate(("overview", "policy", "experiment", "settings")):
+    for index, name in enumerate(("overview", "policy", "experiment", "settings", "about")):
         window.show_page(index)
         app.processEvents()
         window.grab().save(str(folder / f"{index + 1:02}-{name}.png"))
     window.resize(1040, 700)
+    for index, name in ((3, "settings"), (4, "about")):
+        window.show_page(index)
+        app.processEvents()
+        window.grab().save(str(folder / f"compact-{name}.png"))
     window.show_page(1)
     app.processEvents()
     window.grab().save(str(folder / "05-compact-policy.png"))
@@ -69,7 +75,7 @@ def main():
     window.grab().save(str(folder / "08-compact-overview.png"))
     window.close()
 
-    many = MainWindow(AppConfig(), ConfigManager(folder / "simulation-64.json"), start_worker=False)
+    many = MainWindow(AppConfig(theme=args.theme), ConfigManager(folder / "simulation-64.json"), start_worker=False)
     many.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
     many.on_ready(CpuTopology(32, 64, tuple(range(64)), name="64 CPU 界面模拟"))
     many.banner.setText("界面预览 · 模拟 64 个逻辑处理器，未操作真实进程")

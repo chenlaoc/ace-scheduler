@@ -49,3 +49,18 @@ Remove-Item Env:QT_SCALE_FACTOR
 CI 保存 JUnit XML、打包验收 JSON、页面截图和 ZIP 校验文件为 Actions artifacts。仓库只保存脱敏摘要与合成界面截图；`artifacts/` 是本地证据目录，不进入 Git。较早验证文档中的本地证据路径用于原工作区追溯，首次克隆时不会包含这些文件。
 
 103 项回归是 v1.3.1 的验证基线；后续以相应提交的 CI 结果为准。历史测量与测试边界见 [验证记录](VALIDATION.md)。
+
+## v1.5.0 日常可用性回归
+
+新增 `test_recovery.py`、`test_lifecycle.py`、`test_elevation.py` 和 `test_diagnostics.py`，覆盖恢复记录故障、真实双进程 IPC/提权交接协议、后台停止/重启、诊断脱敏和关于页。按需提权协议自动测试不会触发真实 UAC 安全桌面；取消/授权实际桌面流程、Explorer 重启和系统睡眠需人工验收。
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.tray_smoke --output artifacts\daily-tray-native
+.\.venv\Scripts\python.exe -m tools.preview_ui --output artifacts\daily-preview
+```
+
+托盘检查仅创建本应用窗口，没有监控工作线程或调度写入。打包验收同时校验诊断 ZIP、关于页面及源码的版本一致性。具体实现与边界见 [日常可用性实现记录](DAILY_USABILITY.md)。
+
+### 启动权限与主题
+
+普通启动已改为打开窗口前申请管理员权限，测试模拟启动、授权取消/失败与已有窗口激活，不触发真实 UAC。`test_theme.py` 验证三种主题、旧配置、即时切换、持久化失败回退及系统通知；通知使用 Qt 信号模拟，不修改 Windows 个性化设置。`tools.preview_ui --theme light` 和 `--theme dark` 可生成两种尺寸的五页预览。UAC 安全桌面的实际操作仍需人工验收。

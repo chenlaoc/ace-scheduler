@@ -39,7 +39,7 @@ class PolicyPage(Page):
         self.selected = {rule.key for rule in owner.config.rules if rule.enabled}
         self.controls = {}
         self.pending_keys = ()
-        self.message = "编辑后统一保存或应用。"
+        self.message = "改好参数后，保存或应用勾选的规则。"
         card = GlassCard()
         card.body.setContentsMargins(18, 18, 18, 18)
         card.body.setSpacing(12)
@@ -95,7 +95,7 @@ class PolicyPage(Page):
         for index, width in enumerate((190, 96, 104, 108, 64, 76, 62)):
             self.table.setColumnWidth(index, width)
         card.body.addWidget(self.table)
-        card.body.addWidget(label("左侧勾选决定批量范围；右侧「监控」决定规则是否启用。各行参数可分别调整，最后一起应用。", "muted", True))
+        card.body.addWidget(label("勾选左侧的进程后，可一起保存或应用。右侧“监控”开关控制规则是否启用，每行参数也可以单独修改。", "muted", True))
         management = QHBoxLayout()
         self.add_button = QPushButton("＋ 添加进程")
         self.add_button.clicked.connect(self.add_rule)
@@ -128,7 +128,7 @@ class PolicyPage(Page):
         self.stop_button.setToolTip("停止后续自动应用，当前调度值保留")
         self.stop_button.clicked.connect(lambda: self.run_command("stop", self.selected_keys()))
         self.restore_button = QPushButton("恢复勾选规则")
-        self.restore_button.setToolTip("恢复勾选规则在本会话修改前的值，并停止自动应用")
+        self.restore_button.setToolTip("恢复勾选规则记录的原设置，并停止后续自动应用")
         self.restore_button.clicked.connect(lambda: self.run_command("restore", self.selected_keys()))
         self.discard_button = QPushButton("撤销勾选的编辑")
         self.discard_button.clicked.connect(self.discard_selected)
@@ -310,13 +310,15 @@ class PolicyPage(Page):
         except ValueError as exc:
             QMessageBox.warning(self, "CPU 选择无效", self.rule(key).name + "：" + str(exc))
             return
+        active = tuple(key for key in keys if self.rule(key).enabled)
+        if apply and active and not self.owner.ensure_write_access():
+            return
         candidate = copy.deepcopy(self.owner.config)
         candidate.rules = [self.rule(rule.key) if rule.key in keys else rule for rule in candidate.rules]
         if not self.save_config(candidate):
             return
         for key in keys:
             self.drafts.pop(key, None)
-        active = tuple(key for key in keys if self.rule(key).enabled)
         self.message = f"已保存 {len(keys)} 条规则 · 修改项需点击应用"
         if apply and active:
             self.run_command("apply", active)
@@ -326,6 +328,8 @@ class PolicyPage(Page):
 
     def run_command(self, kind, keys):
         if not keys or self.owner.read_only or self.owner.pending_commands or not self.owner.topology:
+            return
+        if kind != "stop" and not self.owner.ensure_write_access():
             return
         self.pending_keys = tuple(keys)
         self.owner.pending_commands += 1
@@ -338,29 +342,38 @@ class PolicyPage(Page):
 
     def command_done(self):
         self.pending_keys = ()
-        self.message = "批量处理完成 · 各实例的实际结果见运行概览和日志。"
+        self.message = "已处理本次请求，请到“运行概览”或日志查看各进程的结果。"
         self.refresh_status()
 
     def refresh_status(self):
         keys = self.selected_keys()
-        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down)
+        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down or self.owner.handoff_waiting or self.owner.restarting)
         if hasattr(self.owner, "restore_all_button"):
             self.owner.restore_all_button.setEnabled(bool(self.owner.topology and not self.owner.read_only and not pending))
             self.owner.monitor_interval.setEnabled(not pending)
             self.owner.enforce_interval.setEnabled(not pending)
+            settings = getattr(self.owner, "settings_page", None)
+            if settings:
+                settings.restart_button.setEnabled(bool(self.owner.worker_failure) and not pending)
+                settings.force_restore_button.setEnabled(not self.owner.read_only and not pending and not self.owner.worker_failure)
+                settings.abandon_button.setEnabled(not self.owner.read_only and not pending)
+                settings.close_behavior.setEnabled(not pending)
         active = sum(self.rule(key).enabled for key in keys)
         self.count.setText(f"已勾选 {len(keys)} / {len(self.controls)}")
         summary = f"勾选 {len(keys)} 条 · 待保存 {len(self.drafts)} 条"
         if len(keys) != active:
             summary += f" · {len(keys) - active} 条停用，应用时跳过"
         if self.drafts.keys() - self.selected:
-            summary += "\n含未勾选的编辑，本次将保留。"
+            summary += "\n未勾选的编辑会保留，暂不保存或应用。"
         if self.message:
             summary += "\n" + self.message
         self.summary.setText(summary)
         self.apply_button.setText(f"应用勾选 ({active})")
         self.save_button.setEnabled(bool(keys and self.owner.topology and not pending))
         self.apply_button.setEnabled(bool(keys and self.owner.topology and not pending and not self.owner.read_only))
+        if self.owner.worker_failure:
+            self.apply_button.setEnabled(False)
+            self.owner.restore_all_button.setEnabled(False)
         for button in (self.stop_button, self.restore_button):
             button.setEnabled(bool(keys and self.owner.topology and not pending and not self.owner.read_only))
         self.discard_button.setEnabled(bool(set(keys) & self.drafts.keys()) and not pending)

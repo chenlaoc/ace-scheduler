@@ -3,6 +3,7 @@ import time
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
+from .theme import is_dark
 
 
 class HistoryChart(QWidget):
@@ -27,15 +28,15 @@ class HistoryChart(QWidget):
                                                       ("read_mbps", "Read MB/s", "#28ac91"),
                                                       ("write_mbps", "Write MB/s", "#a083e7"))):
             rect = QRectF(index * width + 3, 37, width - 25, self.height() - 64)
-            painter.setPen(QColor("#6b7d94"))
+            painter.setPen(QColor("#b6c9e2" if is_dark(self) else "#6b7d94"))
             painter.drawText(QPointF(rect.left(), 17), title)
             valid = [getattr(s, field) for s in self.samples if getattr(s, field) is not None]
             maximum = max(1.0, max(valid, default=1.0) * 1.15)
             for part in (0, .5, 1):
                 y = rect.top() + rect.height() * part
-                painter.setPen(QPen(QColor("#e6edf5"), 1, Qt.PenStyle.DashLine))
+                painter.setPen(QPen(QColor("#354961" if is_dark(self) else "#e6edf5"), 1, Qt.PenStyle.DashLine))
                 painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
-            painter.setPen(QColor("#99a7b9"))
+            painter.setPen(QColor("#a1b6d0" if is_dark(self) else "#99a7b9"))
             painter.drawText(QPointF(rect.left(), rect.bottom() + 21), "−60 s")
             painter.drawText(QPointF(rect.right() - 28, rect.bottom() + 21), "现在")
             painter.drawText(QRectF(rect.right() - 64, 0, 64, 24), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{maximum:.1f}")

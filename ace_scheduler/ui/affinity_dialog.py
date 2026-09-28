@@ -12,7 +12,6 @@ class AffinityDialog(QDialog):
         self.setWindowTitle("CPU 分配")
         self.resize(680, 460)
         self.setMinimumWidth(570)
-        self.setStyleSheet("QDialog { background: #edf2f9; }")
         self.chosen_spec = None
         specs = {rule.policy.affinity for rule in rules}
         self.mixed = len(specs) > 1
@@ -21,7 +20,7 @@ class AffinityDialog(QDialog):
         layout.setContentsMargins(22, 22, 22, 22)
         card = GlassCard("CPU 分配", rules[0].name if len(rules) == 1 else f"统一调整 {len(rules)} 条规则的 CPU 分配")
         card.setToolTip("\n".join(rule.name for rule in rules))
-        self.hint = label("当前分配不同，请先选择新的分配方式。" if self.mixed else "只修改 CPU 分配，其他参数保持各行设置。", "muted", True)
+        self.hint = label("所选规则的 CPU 分配不同，请先选择一种分配方式。" if self.mixed else "这里只修改 CPU 分配，各行的其他参数保持不变。", "muted", True)
         card.body.addWidget(self.hint)
         self.editor = AffinityWidget(topology)
         self.editor.set_spec(AffinitySpec() if self.mixed else rules[0].policy.affinity)

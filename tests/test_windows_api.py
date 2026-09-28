@@ -110,6 +110,27 @@ def test_64_bit_affinity_mask_including_high_bit():
 
 
 @pytest.mark.windows
+def test_real_recovery_after_interrupted_session_only_own_child(helper, tmp_path):
+    from ace_scheduler.core.recovery import RecoveryJournal
+    path = tmp_path / "recovery.json"
+    topology = CpuTopology.detect()
+    first = Scheduler(WindowsProcessApi(), topology, RecoveryJournal(path))
+    original = first.inspect(helper)
+    try:
+        assert first.apply(helper, preset("Strong")).ok
+        # Drop the entire scheduler: only the journal survives into the next session.
+        del first
+        second = Scheduler(WindowsProcessApi(), topology, RecoveryJournal(path))
+        assert second.inspect(helper).priority == 0x40
+        assert second.restore(helper).ok
+        assert second.inspect(helper) == original
+        assert not RecoveryJournal(path).records
+    finally:
+        cleanup = Scheduler(WindowsProcessApi(), topology, RecoveryJournal(path))
+        assert cleanup.restore(helper, force=True).ok
+
+
+@pytest.mark.windows
 def test_real_monitor_apply_enforce_and_restore_cooperative_child(helper):
     from ace_scheduler.config.models import AppConfig, ProcessRule
     from ace_scheduler.core.process_monitor import MonitorEngine

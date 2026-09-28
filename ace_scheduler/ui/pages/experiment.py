@@ -9,8 +9,8 @@ class ExperimentPage(Page):
     def __init__(self, owner):
         super().__init__()
         intro = GlassCard()
-        intro.body.addWidget(label("让数据回答，调度是否有效。", "sectionTitle"))
-        intro.body.addWidget(label("先观察，再应用策略。同一进程的前后数据会在这里对照。", "muted", True))
+        intro.body.addWidget(label("比较调度前后的资源占用", "sectionTitle"))
+        intro.body.addWidget(label("先记录一段未调整时的数据，再应用策略。这里会保留同一进程的前后结果。", "muted", True))
         steps = QHBoxLayout()
         for text in ("01  观察基线", "02  应用策略", "03  比较变化"):
             steps.addWidget(label(text, "badge"))
@@ -50,8 +50,8 @@ class ExperimentPage(Page):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
         comparison.body.addLayout(grid)
-        owner.comparison = label("还没有应用记录。先积累一段基线，再应用策略。", "muted", True)
+        owner.comparison = label("还没有应用策略。先观察一段时间，应用后即可查看前后对照。", "muted", True)
         comparison.body.addWidget(owner.comparison)
         self.body.addWidget(comparison)
-        self.body.addWidget(label("CPU 调度不等于磁盘限速。比较相近场景的结果，并留意操作是否成功。", "muted", True))
+        self.body.addWidget(label("请在相近场景下比较，并确认操作已成功。CPU 调度不会直接限制磁盘读写速度。", "muted", True))
         self.body.addStretch()

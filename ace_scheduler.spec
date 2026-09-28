@@ -3,9 +3,20 @@ from pathlib import Path
 import importlib.util
 import os
 import sys
+import json
+import subprocess
 from PyInstaller.utils.hooks import copy_metadata
 
 project = Path(SPECPATH)
+source_version = {}
+exec((project / 'ace_scheduler/__init__.py').read_text(encoding='utf-8'), source_version)
+commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=project, capture_output=True, text=True)
+status = subprocess.run(['git', 'status', '--porcelain'], cwd=project, capture_output=True, text=True)
+build_info = Path(workpath) / 'build-info.json'
+build_info.parent.mkdir(parents=True, exist_ok=True)
+build_info.write_text(json.dumps({'version': source_version['__version__'],
+    'commit': commit.stdout.strip() if commit.returncode == 0 else 'unknown',
+    'dirty': bool(status.stdout)}), encoding='utf-8')
 # Resolve dependencies only from Python/Qt and Windows. Unrelated applications on
 # PATH may ship DLLs with the same basename but incompatible exports (e.g. ICU).
 system_root = Path(os.environ.get('SystemRoot', r'C:\Windows'))
@@ -22,6 +33,7 @@ analysis = Analysis(
     pathex=[str(project)],
     binaries=[],
     datas=[(str(project / 'README.md'), '.'), (str(project / 'LICENSE'), '.'),
+           (str(build_info), '.'),
            (str(project / 'THIRD_PARTY_NOTICES.md'), '.'),
            (str(project / 'docs'), 'docs'), (str(project / 'assets' / 'brand'), 'assets/brand'),
            (str(project / 'licenses'), 'licenses'),
@@ -46,7 +58,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=os.environ.get('ACE_SCHEDULER_CONSOLE') == '1',
-    # Runtime UAC request permits an explicit --monitor-only mode without elevation.
+    # main requests elevation at normal startup; keep explicit read-only CLI modes unelevated.
     uac_admin=False,
 )
 collect = COLLECT(exe, analysis.binaries, analysis.datas,
