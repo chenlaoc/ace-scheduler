@@ -116,3 +116,23 @@ def test_readonly_worker_never_restores_or_applies_saved_records(tmp_path):
     worker.apply_rules(("test.exe",))
     worker.abandon_recovery()
     assert scheduler.originals == saved and len(scheduler.api.writes) == count
+
+
+def test_ordinary_worker_can_abandon_records_but_cannot_write_processes(tmp_path):
+    from ace_scheduler.core.process_monitor import MonitorWorker, MonitorEngine
+    from ace_scheduler.core.recovery import RecoveryJournal
+    from ace_scheduler.core.scheduler import Scheduler
+    from ace_scheduler.core.process_metrics import ProcessIdentity
+    from ace_scheduler.config.models import preset
+    from tests.fakes import FakeApi
+    scheduler = Scheduler(FakeApi(), CpuTopology(4, 8, tuple(range(8))), RecoveryJournal(tmp_path / "recovery.json"))
+    key = ProcessIdentity(1, 1, "test.exe")
+    scheduler.apply(key, preset("Strong"))
+    count = len(scheduler.api.writes)
+    worker = MonitorWorker(AppConfig(), write_enabled=False)
+    worker.engine = MonitorEngine(scheduler, AppConfig())
+    worker.restore(None)
+    worker.apply_rules(("test.exe",))
+    assert scheduler.originals and len(scheduler.api.writes) == count
+    worker.abandon_recovery()
+    assert not scheduler.originals and len(scheduler.api.writes) == count

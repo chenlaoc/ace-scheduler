@@ -71,6 +71,39 @@ def test_timeout_preserves_source_and_revokes_late_child(app, tmp_path):
     lock.unlock()
 
 
+def test_invalid_claim_does_not_leave_handoff_spinning(app, tmp_path):
+    window = make_window(tmp_path)
+    lock = QLockFile(str(tmp_path / "instance.lock"))
+    assert lock.tryLock(0)
+    handoff = ElevationHandoff(window, lock, None, launcher=lambda _: None)
+    handoff.start()
+    identity = own_identity()
+    identity["created"] += 1
+    handoff.files.write("claimed", identity)
+    handoff.poll()
+    assert window.isEnabled() and not window.handoff_waiting and not handoff.timer.isActive()
+    window.close()
+    lock.unlock()
+
+
+def test_apply_all_disabled_and_abandon_local_records_do_not_request_uac(app, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from PySide6.QtWidgets import QMessageBox
+    window = make_window(tmp_path)
+    requests, abandoned = [], []
+    window.elevation_request = lambda: requests.append(True)
+    window.abandon_requested.connect(lambda: abandoned.append(True))
+    for key in window.policy_page.selected_keys():
+        window.policy_page.stage(replace(window.policy_page.rule(key), enabled=False))
+    window.policy_page.commit(True)
+    assert not requests and not window.pending_commands
+    monkeypatch.setattr(QMessageBox, "question", lambda *_: QMessageBox.StandardButton.Yes)
+    window.resolve_recovery(False)
+    assert not requests and abandoned == [True]
+    window.on_command_done()
+    window.close()
+
+
 def test_real_two_process_handoff_carries_drafts_and_never_arms(app, tmp_path):
     """Use a normal child to verify the protocol; deliberately never request real UAC."""
     window = make_window(tmp_path)

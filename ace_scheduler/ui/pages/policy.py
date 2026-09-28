@@ -310,7 +310,8 @@ class PolicyPage(Page):
         except ValueError as exc:
             QMessageBox.warning(self, "CPU 选择无效", self.rule(key).name + "：" + str(exc))
             return
-        if apply and not self.owner.ensure_write_access():
+        active = tuple(key for key in keys if self.rule(key).enabled)
+        if apply and active and not self.owner.ensure_write_access():
             return
         candidate = copy.deepcopy(self.owner.config)
         candidate.rules = [self.rule(rule.key) if rule.key in keys else rule for rule in candidate.rules]
@@ -318,7 +319,6 @@ class PolicyPage(Page):
             return
         for key in keys:
             self.drafts.pop(key, None)
-        active = tuple(key for key in keys if self.rule(key).enabled)
         self.message = f"已保存 {len(keys)} 条规则 · 修改项需点击应用"
         if apply and active:
             self.run_command("apply", active)

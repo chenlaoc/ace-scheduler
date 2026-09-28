@@ -81,7 +81,8 @@ class MainWindow(FramelessMainWindow):
     def start_monitor(self):
         self.worker_failure = ""
         self.thread = QThread(self)
-        self.worker = MonitorWorker(copy.deepcopy(self.config), self.manager.path.with_name("recovery.json"), not self.write_enabled)
+        self.worker = MonitorWorker(copy.deepcopy(self.config), self.manager.path.with_name("recovery.json"),
+                                    self.read_only, self.write_enabled)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.start)
         self.worker.ready.connect(self.on_ready)
@@ -365,7 +366,7 @@ class MainWindow(FramelessMainWindow):
     def resolve_recovery(self, force=False):
         if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
             return
-        if not self.ensure_write_access():
+        if force and not self.ensure_write_access():
             return
         message = ("将对仍属于原实例的记录恢复原值，包括被外部修改或写入未确认的字段。确认覆盖？" if force else
                    "将停止全部规则、保留当前调度值，并归档所有恢复记录（包括损坏记录）。之后不能再用这些记录恢复。")
@@ -567,8 +568,6 @@ class MainWindow(FramelessMainWindow):
                 return
             if box.clickedButton() != keep:
                 self.explicit_exit = False
-                return
-            if not self.write_enabled and not self.ensure_write_access():
                 return
         self._shutdown()
 

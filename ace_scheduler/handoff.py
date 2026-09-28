@@ -192,8 +192,14 @@ class ElevationHandoff(QObject):
             return
         try:
             if self.files and self.files.path("claimed").exists():
-                self.timer.start()
-                return
+                try:
+                    check_identity(self.files.read("claimed"))
+                except (OSError, ValueError, KeyError, TypeError, psutil.Error):
+                    pass
+                else:
+                    self.failure_message = ""
+                    self.timer.start()
+                    return
             if self.files:
                 self.files.cleanup()
             if self.released and not self.lock.tryLock(0):
@@ -204,6 +210,7 @@ class ElevationHandoff(QObject):
                 self.instance = InstanceServer(self.directory, self)
                 self.instance.activated.connect(self.window.activate_window)
             self.transfer.unlock()
+            self.failure_message = ""
             self.window.handoff_waiting = False
             self.window.setEnabled(True)
             self.window.banner.setText(message)

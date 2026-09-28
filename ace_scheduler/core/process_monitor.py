@@ -223,7 +223,7 @@ class MonitorWorker(QObject):
     finish_failed = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, config: AppConfig, recovery_path=None, read_only=False):
+    def __init__(self, config: AppConfig, recovery_path=None, read_only=False, write_enabled=True):
         super().__init__()
         self.config = config
         self.engine = None
@@ -231,6 +231,7 @@ class MonitorWorker(QObject):
         self.enforce_timer = None
         self.recovery_path = recovery_path
         self.read_only = read_only
+        self.write_enabled = write_enabled and not read_only
         self.last_scan = time.monotonic()
         self.failure = ""
 
@@ -347,7 +348,7 @@ class MonitorWorker(QObject):
     def _batch(self, kind, keys):
         """Queue one operation and scan once for the whole set, not once per rule."""
         try:
-            if self.read_only or self.failure:
+            if (kind != "stop" and not self.write_enabled) or self.failure:
                 self._log("只读模式，操作未执行")
                 return
             if not self.engine:
@@ -390,7 +391,7 @@ class MonitorWorker(QObject):
     def _restore(self, key, force=False):
         ok = False
         try:
-            if self.read_only:
+            if not self.write_enabled:
                 return
             if not self.engine:
                 self._log("后台尚未就绪，恢复未执行")
