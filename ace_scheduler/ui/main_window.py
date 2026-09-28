@@ -22,6 +22,7 @@ from .pages.overview import OverviewPage
 from .pages.policy import PolicyPage
 from .pages.experiment import ExperimentPage
 from .pages.settings import SettingsPage
+from .pages.about import AboutPage
 
 
 class MainWindow(FramelessMainWindow):
@@ -35,6 +36,7 @@ class MainWindow(FramelessMainWindow):
     abandon_requested = Signal()
     suspend_requested = Signal()
     worker_stopped = Signal()
+    halt_requested = Signal(str)
 
     def __init__(self, config, manager, read_only=False, start_worker=True, enable_tray=False, write_enabled=True):
         super().__init__()
@@ -44,6 +46,8 @@ class MainWindow(FramelessMainWindow):
         self.write_enabled = write_enabled and not read_only
         self.elevation_request = None
         self.handoff_waiting = False
+        self.worker_failure = ""
+        self.restarting = False
         self.topology = None
         self.history = History()
         self.restore_count = 0
@@ -75,6 +79,7 @@ class MainWindow(FramelessMainWindow):
             self.start_monitor()
 
     def start_monitor(self):
+        self.worker_failure = ""
         self.thread = QThread(self)
         self.worker = MonitorWorker(copy.deepcopy(self.config), self.manager.path.with_name("recovery.json"), not self.write_enabled)
         self.worker.moveToThread(self.thread)
@@ -96,6 +101,8 @@ class MainWindow(FramelessMainWindow):
         self.abandon_requested.connect(self.worker.abandon_recovery)
         self.worker.recovery_notice.connect(self.on_recovery_notice)
         self.worker.finish_failed.connect(self.on_finish_failed)
+        self.worker.failed.connect(self.on_worker_failure)
+        self.halt_requested.connect(self.worker.halt)
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self._thread_finished)
         self.thread.start()
@@ -134,7 +141,7 @@ class MainWindow(FramelessMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         for index, (text, symbol) in enumerate((("运行概览", "overview"), ("调度策略", "policy"),
-                                                ("实验对照", "experiment"), ("设置与日志", "settings"))):
+                                                ("实验对照", "experiment"), ("设置与日志", "settings"), ("关于", "settings"))):
             button = QPushButton("  " + text)
             button.setIcon(icon(symbol))
             button.setIconSize(QSize(21, 21))
@@ -185,7 +192,8 @@ class MainWindow(FramelessMainWindow):
         self.policy_page = PolicyPage(self)
         self.experiment_page = ExperimentPage(self)
         self.settings_page = SettingsPage(self)
-        for page in (self.overview_page, self.policy_page, self.experiment_page, self.settings_page):
+        self.about_page = AboutPage(self)
+        for page in (self.overview_page, self.policy_page, self.experiment_page, self.settings_page, self.about_page):
             self.pages.addWidget(page)
         content.addWidget(self.pages, 1)
         content.addWidget(self.policy_page.footer)
@@ -198,7 +206,8 @@ class MainWindow(FramelessMainWindow):
         titles = (("运行概览", "掌握进程的实时资源变化。"),
                   ("调度策略", "直接逐行调整，或勾选多个进程统一配置。"),
                   ("实验对照", "观察调度前后，CPU 与 I/O 如何变化。"),
-                  ("设置与日志", "调整监控节奏，查看每一次操作。"))
+                  ("设置与日志", "调整监控节奏，查看每一次操作。"),
+                  ("关于", "版本信息、本地数据与第三方许可。"))
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
         self.page_title.setText(titles[index][0])
@@ -226,6 +235,8 @@ class MainWindow(FramelessMainWindow):
 
     @Slot(object)
     def on_ready(self, topology):
+        if hasattr(self, "exception_reporter"):
+            self.exception_reporter.reported = False
         self.topology = topology
         physical = topology.physical if topology.physical is not None else "未知"
         self.cpu_label.setText(topology.name)
@@ -280,7 +291,7 @@ class MainWindow(FramelessMainWindow):
             self.policy_page.run_command("stop", tuple(self.armed))
 
     def ensure_write_access(self):
-        if self.read_only or self.handoff_waiting:
+        if self.read_only or self.handoff_waiting or self.worker_failure or self.restarting:
             return False
         if self.write_enabled:
             return True
@@ -289,6 +300,43 @@ class MainWindow(FramelessMainWindow):
         else:
             self.banner.setText("调度写入需要管理员权限；请以管理员身份重新打开。")
         return False
+
+    @Slot(str)
+    def on_worker_failure(self, message):
+        self.worker_failure = message
+        self.armed.clear()
+        self.pending_commands = 0
+        self.pending_restore = self.pending_close = self.close_after_command = False
+        self.activate_window()
+        self.banner.setText(message + "。恢复记录保留，可在设置中重新启动后台后重试。")
+        self.session_badge.setText("●  后台已停止")
+        self.policy_page.refresh_status()
+        if self.tray:
+            self.tray.update(True)
+
+    def restart_monitor(self):
+        if not self.worker_failure or self.restarting or self.handoff_waiting or self.shutting_down:
+            return
+        self.restarting = True
+        self.banner.setText("正在重新启动后台；策略将保持未启用。")
+        if self.thread and self.thread.isRunning():
+            self.suspend_requested.emit()
+        else:
+            self._thread_finished()
+
+    def export_diagnostics(self):
+        if QMessageBox.question(self, "导出诊断", "将导出版本/构建、Windows 版本、CPU 拓扑数量、无进程名称的配置摘要和脱敏事件日志。\n不含原始配置、恢复记录、个人路径、PID 或令牌，也不会上传。") != QMessageBox.StandardButton.Yes:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "保存诊断 ZIP", "ACE-Scheduler-diagnostics.zip", "ZIP (*.zip)")
+        if not path:
+            return
+        from ace_scheduler.diagnostics import export_diagnostics
+        try:
+            export_diagnostics(path, self.config, self.topology, self.log.toPlainText(), self.manager.path.parent,
+                               read_only=self.read_only, worker_failed=self.worker_failure)
+            self.banner.setText("诊断 ZIP 已保存到所选位置，未上传。")
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "诊断导出失败", str(exc))
 
     def request_restore_all(self):
         if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
@@ -344,7 +392,7 @@ class MainWindow(FramelessMainWindow):
         self.history.retain(keep)
         self.latest_snapshot = (rows, armed, originals)
         if self.tray:
-            self.tray.update(any("失败" in row.status or "冲突" in row.status for row in rows))
+            self.tray.update(bool(self.worker_failure) or any("失败" in row.status or "冲突" in row.status for row in rows))
         if self.background_hidden:
             return
         self._render_snapshot(rows, armed, originals)
@@ -368,6 +416,8 @@ class MainWindow(FramelessMainWindow):
         self.overview_page.empty.setVisible(not rows)
         self.overview_page.count.setText(f"{len(rows)} 个运行中")
         self.session_badge.setText("●  只读监控" if self.read_only else (f"●  {len(armed)} 条策略已启用" if armed else "●  观察模式"))
+        if self.worker_failure:
+            self.session_badge.setText("●  后台已停止")
         self.refresh_policy_status()
         self.refresh_history()
 
@@ -473,7 +523,7 @@ class MainWindow(FramelessMainWindow):
             self.close()
 
     def closeEvent(self, event):
-        if self.handoff_waiting:
+        if self.handoff_waiting or self.restarting:
             event.ignore()
             return
         if not self.allow_close and not self.explicit_exit and self.config.close_to_tray:
@@ -518,7 +568,7 @@ class MainWindow(FramelessMainWindow):
             if box.clickedButton() != keep:
                 self.explicit_exit = False
                 return
-            if not self.ensure_write_access():
+            if not self.write_enabled and not self.ensure_write_access():
                 return
         self._shutdown()
 
@@ -531,12 +581,24 @@ class MainWindow(FramelessMainWindow):
             self.log.appendPlainText("保存窗口设置失败：" + str(exc))
         self.setEnabled(False)
         self.banner.setText("正在停止后台监控…")
-        self.stop_requested.emit()
+        if self.thread and self.thread.isRunning():
+            self.stop_requested.emit()
+        else:
+            self.allow_close = True
+            self.close()
 
     @Slot()
     def _thread_finished(self):
+        if self.restarting:
+            self.restarting = False
+            self.start_monitor()
+            self.banner.setText("后台已重新启动；当前只观察，策略需再次明确应用。")
+            return
         if self.handoff_waiting:
             self.worker_stopped.emit()
+            return
+        if not self.shutting_down:
+            self.on_worker_failure("后台线程意外结束，维护已停止")
             return
         self.allow_close = True
         self.close()

@@ -41,7 +41,11 @@ def main():
             raise RuntimeError(f"Startup validation failed: {field}")
     if report.get("name") != "ACE Scheduler" or report.get("version") != version:
         raise RuntimeError("Packaged application identity differs from source")
-    if report.get("pages") != ["overview", "policy", "experiment", "settings"]:
+    with zipfile.ZipFile(smoke / "diagnostics.zip") as diagnostics:
+        diagnostic_report = json.loads(diagnostics.read("report.json"))
+    if diagnostic_report["build"]["version"] != version or version not in report.get("about_version", ""):
+        raise RuntimeError("Diagnostic or About version differs from the packaged application")
+    if report.get("pages") != ["overview", "policy", "experiment", "settings", "about"]:
         raise RuntimeError("Incomplete page capture")
     for page in report["pages"]:
         if (smoke / f"{page}.png").stat().st_size < 1000:

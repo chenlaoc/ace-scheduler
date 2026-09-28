@@ -44,6 +44,12 @@ class SettingsPage(Page):
         recovery_actions.addWidget(self.abandon_button)
         recovery_actions.addStretch()
         session.body.addLayout(recovery_actions)
+        self.restart_button = QPushButton("重新启动后台")
+        self.restart_button.clicked.connect(owner.restart_monitor)
+        session.body.addWidget(setting_row("后台状态", "后台发生异常时停止维护；重启后只观察", self.restart_button))
+        self.diagnostics_button = QPushButton("导出诊断 ZIP…")
+        self.diagnostics_button.clicked.connect(owner.export_diagnostics)
+        session.body.addWidget(setting_row("本地诊断", "导出脱敏摘要与事件日志，不会上传", self.diagnostics_button))
         self.body.addWidget(session)
 
         logs = GlassCard()

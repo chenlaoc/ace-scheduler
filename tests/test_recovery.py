@@ -118,3 +118,12 @@ def test_keep_decision_completes_session(tmp_path):
     scheduler.abandon()
     assert not start(path).originals
     assert scheduler.api.values[KEY]["priority"] == 0x40
+
+
+def test_corrupt_journal_cannot_report_successful_restore(tmp_path):
+    from ace_scheduler.config.models import AppConfig
+    from ace_scheduler.core.process_monitor import MonitorEngine
+    path = tmp_path / "recovery.json"
+    path.write_text("invalid")
+    engine = MonitorEngine(start(path), AppConfig())
+    assert not engine.restore()

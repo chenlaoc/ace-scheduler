@@ -347,11 +347,17 @@ class PolicyPage(Page):
 
     def refresh_status(self):
         keys = self.selected_keys()
-        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down or self.owner.handoff_waiting)
+        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down or self.owner.handoff_waiting or self.owner.restarting)
         if hasattr(self.owner, "restore_all_button"):
             self.owner.restore_all_button.setEnabled(bool(self.owner.topology and not self.owner.read_only and not pending))
             self.owner.monitor_interval.setEnabled(not pending)
             self.owner.enforce_interval.setEnabled(not pending)
+            settings = getattr(self.owner, "settings_page", None)
+            if settings:
+                settings.restart_button.setEnabled(bool(self.owner.worker_failure) and not pending)
+                settings.force_restore_button.setEnabled(not self.owner.read_only and not pending and not self.owner.worker_failure)
+                settings.abandon_button.setEnabled(not self.owner.read_only and not pending)
+                settings.close_behavior.setEnabled(not pending)
         active = sum(self.rule(key).enabled for key in keys)
         self.count.setText(f"已勾选 {len(keys)} / {len(self.controls)}")
         summary = f"勾选 {len(keys)} 条 · 待保存 {len(self.drafts)} 条"
@@ -365,6 +371,9 @@ class PolicyPage(Page):
         self.apply_button.setText(f"应用勾选 ({active})")
         self.save_button.setEnabled(bool(keys and self.owner.topology and not pending))
         self.apply_button.setEnabled(bool(keys and self.owner.topology and not pending and not self.owner.read_only))
+        if self.owner.worker_failure:
+            self.apply_button.setEnabled(False)
+            self.owner.restore_all_button.setEnabled(False)
         for button in (self.stop_button, self.restore_button):
             button.setEnabled(bool(keys and self.owner.topology and not pending and not self.owner.read_only))
         self.discard_button.setEnabled(bool(set(keys) & self.drafts.keys()) and not pending)

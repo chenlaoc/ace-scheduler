@@ -56,11 +56,15 @@ def main():
     window.policy_page.set_preset(("ace-tray.exe",), "Mild")
     window.resize(1280, 860)
     window.show()
-    for index, name in enumerate(("overview", "policy", "experiment", "settings")):
+    for index, name in enumerate(("overview", "policy", "experiment", "settings", "about")):
         window.show_page(index)
         app.processEvents()
         window.grab().save(str(folder / f"{index + 1:02}-{name}.png"))
     window.resize(1040, 700)
+    for index, name in ((3, "settings"), (4, "about")):
+        window.show_page(index)
+        app.processEvents()
+        window.grab().save(str(folder / f"compact-{name}.png"))
     window.show_page(1)
     app.processEvents()
     window.grab().save(str(folder / "05-compact-policy.png"))

@@ -1,6 +1,7 @@
 import copy
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -153,3 +154,77 @@ def test_admin_or_monitor_only_never_requests_uac(app, tmp_path):
     normal.read_only = True
     assert not normal.ensure_write_access() and not requests
     normal.close()
+
+
+def test_failed_handoff_after_release_restarts_only_source_observer(app, tmp_path):
+    window = make_window(tmp_path)
+    window.start_monitor()
+    lock = QLockFile(str(tmp_path / "instance.lock"))
+    assert lock.tryLock(0)
+    handoff = ElevationHandoff(window, lock, None, launcher=lambda _: None)
+    original_thread = window.thread
+    try:
+        handoff.start()
+        handoff.files.write("ready", own_identity())
+        handoff.poll()
+        deadline = time.monotonic() + 5
+        while not handoff.released and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.01)
+        assert handoff.released and not original_thread.isRunning()
+        handoff.fail("injected child failure")
+        assert window.thread is not original_thread
+        assert window.isEnabled() and window.policy_page.drafts and not window.handoff_waiting
+        assert not window.write_enabled and not window.armed
+        competitor = QLockFile(str(tmp_path / "instance.lock"))
+        assert not competitor.tryLock(0)
+    finally:
+        handoff.timer.stop()
+        window.handoff_waiting = False
+        window._shutdown()
+        deadline = time.monotonic() + 5
+        while window.thread.isRunning() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(.01)
+        assert not window.thread.isRunning()
+        if handoff.instance:
+            handoff.instance.close()
+        lock.unlock()
+
+
+def test_ordinary_main_starts_without_uac_in_isolated_profile(tmp_path):
+    script = '''
+import json, sys
+from pathlib import Path
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+from ace_scheduler.windows import elevation
+elevation.is_admin = lambda: False
+def forbidden(*args):
+    raise AssertionError("Startup must never ask for UAC")
+elevation.request_elevation = forbidden
+original = QApplication.exec
+def execute(app):
+    def inspect():
+        from ace_scheduler.ui.main_window import MainWindow
+        window = next(w for w in app.topLevelWidgets() if isinstance(w, MainWindow))
+        Path(output).write_text(json.dumps({"readonly": window.read_only,
+            "writes": window.write_enabled, "armed": list(window.armed),
+            "ready": window.topology is not None}))
+        window.request_exit()
+    QTimer.singleShot(700, inspect)
+    QTimer.singleShot(8000, app.quit)
+    return original()
+QApplication.exec = execute
+from ace_scheduler.main import main
+output = sys.argv[1]
+# main's parser must see ordinary startup arguments only.
+sys.argv = ["ace_scheduler"]
+raise SystemExit(main())
+'''
+    output = tmp_path / "normal.json"
+    env = dict(os.environ, APPDATA=str(tmp_path), QT_QPA_PLATFORM="offscreen")
+    result = subprocess.run([sys.executable, "-c", script, str(output)], env=env, capture_output=True,
+                            timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert json.loads(output.read_text()) == {"readonly": False, "writes": False, "armed": [], "ready": True}

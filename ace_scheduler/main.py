@@ -33,6 +33,7 @@ def main() -> int:
     from ace_scheduler.branding import APP_NAME, DATA_NAMESPACE, app_icon
     from ace_scheduler.instance import InstanceServer, activate_existing
     from ace_scheduler.handoff import ElevationHandoff, prepare_child
+    from ace_scheduler.errors import ExceptionReporter
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
@@ -85,6 +86,7 @@ def main() -> int:
     except OSError as exc:
         window.log.appendPlainText("已有实例唤醒服务不可用：" + str(exc))
     handoff = ElevationHandoff(window, lock, instance)
+    errors = ExceptionReporter(window)
     if not read_only and not admin:
         window.elevation_request = handoff.start
     window.show()
@@ -94,7 +96,9 @@ def main() -> int:
     if args.smoke_test:
         def capture():
             from dataclasses import asdict
+            from ace_scheduler.diagnostics import build_info, export_diagnostics
             payload = {"name": APP_NAME, "version": __version__, "icon_loaded": not window.windowIcon().isNull(),
+                       "build": build_info(), "about_version": window.about_page.version.text(),
                        "ready": window.topology is not None, "read_only": window.read_only,
                        "frameless": bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint),
                        "native_frame": window.native_frame is not None,
@@ -106,15 +110,18 @@ def main() -> int:
                        "log": window.log.toPlainText()}
             window.grab().save(str(data / "window.png"))
             payload["pages"] = []
-            for index, name in enumerate(("overview", "policy", "experiment", "settings")):
+            for index, name in enumerate(("overview", "policy", "experiment", "settings", "about")):
                 window.show_page(index)
                 app.processEvents()
                 window.grab().save(str(data / f"{name}.png"))
                 payload["pages"].append(name)
+            export_diagnostics(data / "diagnostics.zip", window.config, window.topology,
+                               window.log.toPlainText(), data, read_only=True)
             (data / "smoke.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             window.close()
         QTimer.singleShot(3000, capture)
     code = app.exec()
+    errors.close()
     if instance:
         instance.close()
     if handoff.instance and handoff.instance is not instance:

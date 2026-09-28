@@ -74,6 +74,10 @@ class MonitorEngine:
             self.armed.clear()
         else:
             self.disarm(key)
+        journal = self.scheduler.journal
+        if journal and journal.blocked:
+            self.log("恢复记录损坏或版本不支持，无法恢复；请先归档处理。")
+            return False
         success = True
         for identity in list(self.scheduler.originals):
             if key is not None and identity.name.casefold() != key:
@@ -217,6 +221,7 @@ class MonitorWorker(QObject):
     command_done = Signal()
     recovery_notice = Signal(str)
     finish_failed = Signal(str)
+    failed = Signal(str)
 
     def __init__(self, config: AppConfig, recovery_path=None, read_only=False):
         super().__init__()
@@ -227,6 +232,32 @@ class MonitorWorker(QObject):
         self.recovery_path = recovery_path
         self.read_only = read_only
         self.last_scan = time.monotonic()
+        self.failure = ""
+
+    def _fail(self, message):
+        if self.failure:
+            return
+        self.failure = message
+        if self.monitor_timer:
+            self.monitor_timer.stop()
+        if self.enforce_timer:
+            self.enforce_timer.stop()
+        if self.engine:
+            try:
+                self.engine.armed.clear()
+                for row in self.engine.rows:
+                    row.status = "后台已停止 · " + message
+                self._publish()
+            except Exception:
+                # Failure reporting must also work after partial initialization.
+                logging.getLogger("ace_scheduler").exception("Unable to publish stopped state")
+        self._log(message)
+        logging.getLogger("ace_scheduler").exception("Worker stopped after unexpected failure")
+        self.failed.emit(message)
+
+    @Slot(str)
+    def halt(self, message):
+        self._fail(message)
 
     def _log(self, message):
         logging.getLogger("ace_scheduler").info(message)
@@ -253,8 +284,7 @@ class MonitorWorker(QObject):
             self._log("启动完成：仅监控；保存的策略尚未应用")
             self.scan()
         except Exception as exc:
-            self._log(f"后台初始化失败：{error_text(exc)}")
-            logging.getLogger("ace_scheduler").exception("Worker initialization")
+            self._fail(f"后台初始化失败：{error_text(exc)}")
 
     def _set_intervals(self):
         self.monitor_timer.start(self.config.monitor_interval * 1000)
@@ -265,7 +295,7 @@ class MonitorWorker(QObject):
 
     @Slot()
     def scan(self):
-        if not self.engine:
+        if not self.engine or self.failure:
             return
         try:
             now = time.monotonic()
@@ -277,23 +307,26 @@ class MonitorWorker(QObject):
             self.engine.scan()
             self._publish()
         except Exception as exc:
-            self._log(f"本次采样失败：{error_text(exc)}")
-            logging.getLogger("ace_scheduler").exception("Monitor tick")
+            self._fail(f"后台采样失败，维护已停止：{error_text(exc)}")
 
     @Slot()
     def enforce(self):
-        if self.engine:
+        if self.engine and not self.failure:
             try:
                 self.engine.enforce()
             except Exception as exc:
-                self._log(f"维护策略失败：{error_text(exc)}")
+                self._fail(f"后台维护失败，维护已停止：{error_text(exc)}")
 
     @Slot(object)
     def configure(self, config):
         self.config = config
-        if self.engine:
-            self.engine.configure(config)
-            self._set_intervals()
+        try:
+            if self.engine:
+                self.engine.configure(config)
+                if not self.failure:
+                    self._set_intervals()
+        except Exception as exc:
+            self._fail("后台配置失败：" + error_text(exc))
 
     @Slot(str)
     def apply_rule(self, key):
@@ -314,7 +347,7 @@ class MonitorWorker(QObject):
     def _batch(self, kind, keys):
         """Queue one operation and scan once for the whole set, not once per rule."""
         try:
-            if self.read_only:
+            if self.read_only or self.failure:
                 self._log("只读模式，操作未执行")
                 return
             if not self.engine:
@@ -336,8 +369,7 @@ class MonitorWorker(QObject):
                     (self.engine.arm if kind == "apply" else self.engine.disarm)(key)
                 self.scan()
         except Exception as exc:
-            self._log(f"批量操作失败：{error_text(exc)}")
-            logging.getLogger("ace_scheduler").exception("Batch rule operation")
+            self._fail(f"批量操作失败：{error_text(exc)}")
         finally:
             self.command_done.emit()
 
@@ -408,5 +440,6 @@ class MonitorWorker(QObject):
     def stop(self):
         if self.monitor_timer:
             self.monitor_timer.stop()
+        if self.enforce_timer:
             self.enforce_timer.stop()
         QThread.currentThread().quit()
