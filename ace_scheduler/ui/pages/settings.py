@@ -8,6 +8,15 @@ from .base import Page
 class SettingsPage(Page):
     def __init__(self, owner):
         super().__init__()
+        appearance = GlassCard("外观")
+        self.theme_choice = QComboBox()
+        self.theme_choice.setAccessibleName("界面主题")
+        for title, value in (("自适应（跟随系统）", "system"), ("亮色", "light"), ("暗色", "dark")):
+            self.theme_choice.addItem(title, value)
+        self.theme_choice.setCurrentIndex(self.theme_choice.findData(owner.config.theme))
+        self.theme_choice.activated.connect(owner.theme_preference_changed)
+        appearance.body.addWidget(setting_row("界面主题", "立即生效；自适应会随系统切换亮色或暗色", self.theme_choice))
+        self.body.addWidget(appearance)
         timing = GlassCard("监控偏好")
         owner.monitor_interval = QComboBox()
         owner.enforce_interval = QComboBox()

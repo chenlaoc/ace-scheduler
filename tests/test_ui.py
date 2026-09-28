@@ -11,7 +11,7 @@ from ace_scheduler.core.cpu_topology import CpuTopology
 from ace_scheduler.ui.main_window import MainWindow
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def app():
     return QApplication.instance() or QApplication([])
 

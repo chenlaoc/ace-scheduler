@@ -12,7 +12,6 @@ class AffinityDialog(QDialog):
         self.setWindowTitle("CPU 分配")
         self.resize(680, 460)
         self.setMinimumWidth(570)
-        self.setStyleSheet("QDialog { background: #edf2f9; }")
         self.chosen_spec = None
         specs = {rule.policy.affinity for rule in rules}
         self.mixed = len(specs) > 1

@@ -1,19 +1,75 @@
-"""A restrained glass-inspired desktop theme; all effects are painted locally."""
+"""Application-wide themes, including custom painted controls and dialogs."""
+import re
+
+from PySide6.QtCore import QObject, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication
 
 
-def apply_palette(app):
-    app.setStyle("Fusion")
-    palette = QPalette()
-    colors = {"Window": "#edf2fa", "WindowText": "#18263d", "Base": "#ffffff",
-              "AlternateBase": "#f6f8fc", "Text": "#18263d", "Button": "#f5f8fd",
-              "ButtonText": "#18263d", "Highlight": "#087cfa", "HighlightedText": "#ffffff",
-              "ToolTipBase": "#ffffff", "ToolTipText": "#18263d"}
-    for name, color in colors.items():
-        palette.setColor(getattr(QPalette.ColorRole, name), QColor(color))
-    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
-        palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#919cad"))
-    app.setPalette(palette)
+def is_dark(widget):
+    return widget.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def apply_palette(app, mode="system"):
+    controller = getattr(app, "theme_controller", None)
+    if controller is None:
+        app.setStyle("Fusion")
+        controller = app.theme_controller = ThemeController(app)
+    controller.set_mode(mode)
+    return controller
+
+
+class ThemeController(QObject):
+    changed = Signal(str)
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.mode = "system"
+        self.effective = "light"
+        self.applied = False
+        self.system_scheme = app.styleHints().colorScheme()
+        app.styleHints().colorSchemeChanged.connect(self.system_changed)
+
+    @property
+    def app(self):
+        return QApplication.instance()
+
+    def system_changed(self, scheme):
+        self.system_scheme = scheme
+        # Qt delivers the native palette change after the scheme signal.
+        # Reapply our palette on the next event-loop turn.
+        QTimer.singleShot(0, lambda: self.apply(force=True))
+
+    def set_mode(self, mode):
+        if mode not in ("system", "light", "dark"):
+            raise ValueError("未知主题")
+        self.mode = mode
+        self.apply()
+
+    def apply(self, force=False):
+        dark = self.mode == "dark" or (self.mode == "system" and self.system_scheme == Qt.ColorScheme.Dark)
+        effective = "dark" if dark else "light"
+        if self.applied and effective == self.effective and not force:
+            return
+        changed = not self.applied or self.effective != effective
+        self.effective = effective
+        self.applied = True
+        palette = QPalette()
+        colors = {"Window": ("#edf2fa", "#131d2c"), "WindowText": ("#18263d", "#e3ebf7"),
+                  "Base": ("#ffffff", "#1b293d"), "AlternateBase": ("#f6f8fc", "#223248"),
+                  "Text": ("#18263d", "#e3ebf7"), "Button": ("#f5f8fd", "#25364e"),
+                  "ButtonText": ("#18263d", "#e3ebf7"), "Highlight": ("#087cfa", "#2588ed"),
+                  "HighlightedText": ("#ffffff", "#ffffff"), "ToolTipBase": ("#ffffff", "#223248"),
+                  "ToolTipText": ("#18263d", "#e3ebf7"), "PlaceholderText": ("#738197", "#a5b7cf"),
+                  "Mid": ("#cad6e6", "#405574")}
+        for name, pair in colors.items():
+            palette.setColor(getattr(QPalette.ColorRole, name), QColor(pair[int(dark)]))
+        for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText, QPalette.ColorRole.WindowText):
+            palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#71829a" if dark else "#919cad"))
+        self.app.setPalette(palette)
+        if changed:
+            self.app.setStyleSheet(stylesheet(dark))
+        self.changed.emit(self.effective)
 
 
 STYLE = """
@@ -79,4 +135,58 @@ QScrollBar::handle:horizontal { background: #cad6e6; border-radius: 3px; min-wid
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QToolTip { color: #243752; background: #ffffff; border: 1px solid #dae4f1; padding: 6px; }
+"""
+
+
+# Keep geometry identical between themes; only replace the light color tokens.
+DARK_COLORS = {
+    "#18263d": "#e3ebf7", "#182438": "#f0f5ff", "#718299": "#a5b7cf",
+    "#738197": "#a5b7cf", "#5d6b80": "#b8c8dd", "#15745e": "#77dfbf",
+    "#54708e": "#b2c9e5", "#ffffff": "#26374f", "white": "#26374f",
+    "#accee9": "#6d91b9", "#e6effc": "#324966", "#99a6b8": "#8192ab",
+    "#087cfa": "#77b7ff", "#006de5": "#1673d1", "#eef5ff": "#96aac3",
+    "#aac7e7": "#324b6a", "#64809e": "#a9c3e2", "#718198": "#a5b7cf",
+    "#eaf3ff": "#293f5c", "#81b9fb": "#588bc4", "#e4f0ff": "#294766",
+    "#94c3fb": "#6799d1", "#e0e7f1": "#3a4f6b", "#b3cfed": "#7196be",
+    "#dae4f1": "#405776", "#e8f2ff": "#304d6e", "#506079": "#b8c8dd",
+    "#eaf2ff": "#293f5c", "#f1f6fe": "#293f5c", "#1765b8": "#b9dbff",
+    "#8390a2": "#a7b9cf", "#566c88": "#b3c7e0", "#cddded": "#405776",
+    "#cad6e6": "#435a79", "#243752": "#e3ebf7",
+    "rgba(34, 168, 130, 22)": "rgba(34, 168, 130, 35)",
+    "rgba(34, 168, 130, 28)": "rgba(80, 195, 158, 60)",
+    "rgba(255,255,255,100)": "rgba(38,56,81,180)",
+    "rgba(255,255,255,204)": "rgba(27,41,61,232)",
+    "rgba(255,255,255,245)": "rgba(102,130,163,65)",
+    "rgba(248,251,255,170)": "rgba(25,38,57,220)",
+    "rgba(255,255,255,235)": "rgba(53,76,106,190)",
+    "rgba(229,237,246,100)": "rgba(40,59,85,180)",
+    "rgba(66,94,130,20)": "rgba(131,159,193,45)",
+    "rgba(255,255,255,205)": "rgba(39,57,82,220)",
+    "rgba(182,197,216,105)": "rgba(94,125,160,100)",
+    "rgba(231,238,247,155)": "rgba(34,49,70,180)",
+    "rgba(224,235,249,160)": "rgba(49,72,102,200)",
+    "rgba(255,255,255,135)": "rgba(48,68,95,190)",
+    "rgba(239,244,251,160)": "rgba(36,53,76,200)",
+    "rgba(235,241,249,145)": "rgba(36,53,76,200)",
+    "rgba(245,248,253,230)": "rgba(30,46,67,240)",
+    "rgba(243,247,252,130)": "rgba(35,52,75,160)",
+    "rgba(243,247,252,165)": "rgba(23,36,54,225)",
+    "rgba(211,224,239,130)": "rgba(87,117,153,90)",
+}
+
+
+def stylesheet(dark):
+    text = STYLE
+    if dark:
+        text = re.sub(r"#[0-9a-f]{6}|rgba\([^)]*\)|\bwhite\b",
+                      lambda match: DARK_COLORS.get(match.group(), match.group()), text)
+        text += "QPushButton#primary { color: white; background: #1475d8; border-color: #2588ed; }"
+        text += "QPushButton#primary:hover { background: #2687e7; }"
+        text += "QPushButton#primary:disabled { color: #8192ab; background: #293f5c; border-color: #293f5c; }"
+    return text + """
+QDialog, QMessageBox { background: palette(window); }
+QMenu { background: palette(base); color: palette(text); border: 1px solid palette(mid); padding: 5px; }
+QMenu::item { padding: 7px 24px; }
+QMenu::item:selected { background: palette(highlight); color: palette(highlighted-text); }
+QMenu::item:disabled { color: palette(mid); }
 """

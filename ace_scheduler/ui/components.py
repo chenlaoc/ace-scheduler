@@ -1,7 +1,8 @@
-from PySide6.QtCore import Property, QEasingCurve, QPointF, QRectF, QSize, Qt, QPropertyAnimation
+from PySide6.QtCore import Property, QEvent, QEasingCurve, QPointF, QRectF, QSize, Qt, QPropertyAnimation
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel,
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+from .theme import is_dark
 
 
 def label(text, role="body", wrap=False):
@@ -21,15 +22,23 @@ class Backdrop(QWidget):
         self.cache = None
         super().resizeEvent(event)
 
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.PaletteChange:
+            self.cache = None
+            self.update()
+        super().changeEvent(event)
+
     def paintEvent(self, event):
         if self.cache is None:
             ratio = self.devicePixelRatioF()
             self.cache = QPixmap(int(self.width() * ratio), int(self.height() * ratio))
             self.cache.setDevicePixelRatio(ratio)
-            self.cache.fill(QColor("#edf2f9"))
+            dark = is_dark(self)
+            self.cache.fill(QColor("#101927" if dark else "#edf2f9"))
             paint = QPainter(self.cache)
-            for x, y, radius, color in ((.76, .06, .68, "#c9e1fa"), (.98, .74, .56, "#d3efe7"),
-                                         (.05, .95, .55, "#e3dff7"), (.25, .01, .35, "#f6ede9")):
+            colors = ("#203c5c", "#1b393d", "#302b49", "#332d32") if dark else ("#c9e1fa", "#d3efe7", "#e3dff7", "#f6ede9")
+            for (x, y, radius), color in zip(((.76, .06, .68), (.98, .74, .56),
+                                             (.05, .95, .55), (.25, .01, .35)), colors):
                 center = QPointF(self.width() * x, self.height() * y)
                 gradient = QRadialGradient(center, self.width() * radius)
                 gradient.setColorAt(0, QColor(color))
@@ -119,7 +128,7 @@ class Switch(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        color = QColor("#30bb88" if self.isChecked() else "#d6e0eb")
+        color = QColor("#30bb88" if self.isChecked() else "#4a5e78" if is_dark(self) else "#d6e0eb")
         if not self.isEnabled():
             color.setAlpha(100)
         painter.setBrush(color)

@@ -62,7 +62,7 @@ def export_diagnostics(destination, config, topology, log_text, directory, *, re
     if destination.suffix.casefold() != ".zip":
         destination = destination.with_name(destination.name + ".zip")
     config_summary = {"monitor_interval": config.monitor_interval, "enforce_interval": config.enforce_interval,
-                      "close_to_tray": config.close_to_tray,
+                      "close_to_tray": config.close_to_tray, "theme": config.theme,
                       "rules": [{"index": index, "builtin": rule.builtin, "enabled": rule.enabled,
                                  "keep_enforced": rule.keep_enforced, "policy": asdict(rule.policy)}
                                 for index, rule in enumerate(config.rules)]}

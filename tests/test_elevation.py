@@ -227,7 +227,7 @@ def test_failed_handoff_after_release_restarts_only_source_observer(app, tmp_pat
 
 @pytest.mark.parametrize("mode", ["normal", "cancel", "failure", "guard", "existing", "admin", "readonly", "smoke", "version"])
 def test_startup_permissions_in_isolated_process(tmp_path, mode):
-    script = r''' 
+    script = r'''
 import ctypes, json, sys
 from pathlib import Path
 from PySide6.QtCore import QTimer

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import time
 
 from PySide6.QtCore import QByteArray, QThread, Qt, Signal, Slot, QSize
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
                                QMessageBox,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
@@ -16,7 +16,7 @@ from ace_scheduler.core.experiment import History, summary
 from ace_scheduler.core.process_monitor import MonitorWorker
 from .process_table import number
 from .components import Backdrop, icon, label
-from .theme import STYLE
+from .theme import apply_palette
 from .window_chrome import FramelessMainWindow, TitleBar
 from .pages.overview import OverviewPage
 from .pages.policy import PolicyPage
@@ -41,6 +41,7 @@ class MainWindow(FramelessMainWindow):
     def __init__(self, config, manager, read_only=False, start_worker=True, enable_tray=False, write_enabled=True):
         super().__init__()
         self.config = config
+        self.theme_controller = apply_palette(QApplication.instance(), config.theme)
         self.manager = manager
         self.read_only = read_only
         self.write_enabled = write_enabled and not read_only
@@ -70,6 +71,8 @@ class MainWindow(FramelessMainWindow):
         self.resize(1280, 860)
         self.setMinimumSize(1040, 680)
         self._build()
+        self.theme_controller.changed.connect(self.refresh_theme_icons)
+        self.refresh_theme_icons(self.theme_controller.effective)
         if enable_tray:
             from .tray import TrayController
             self.tray = TrayController(self)
@@ -199,7 +202,6 @@ class MainWindow(FramelessMainWindow):
         content.addWidget(self.pages, 1)
         content.addWidget(self.policy_page.footer)
         shell.addLayout(content, 1)
-        self.setStyleSheet(STYLE)
         self.statusBar().hide()
         self.show_page(0)
 
@@ -270,6 +272,19 @@ class MainWindow(FramelessMainWindow):
         candidate.close_to_tray = self.settings_page.close_behavior.currentData()
         self.persist(candidate)
         self.settings_page.close_behavior.setCurrentIndex(int(self.config.close_to_tray))
+
+    def theme_preference_changed(self, *_):
+        candidate = copy.deepcopy(self.config)
+        candidate.theme = self.settings_page.theme_choice.currentData()
+        if self.persist(candidate):
+            self.theme_controller.set_mode(candidate.theme)
+        self.settings_page.theme_choice.setCurrentIndex(
+            self.settings_page.theme_choice.findData(self.config.theme))
+
+    @Slot(str)
+    def refresh_theme_icons(self, effective):
+        for button, symbol in zip(self.nav_buttons, ("overview", "policy", "experiment", "settings", "settings")):
+            button.setIcon(icon(symbol, "#a9c3e2" if effective == "dark" else "#66809e"))
 
     def activate_window(self):
         self.background_hidden = False
