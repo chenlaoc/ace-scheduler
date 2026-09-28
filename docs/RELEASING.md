@@ -8,6 +8,18 @@
 - Dependabot 每周检查 Python 依赖和 Actions；依赖更新需通过相同测试，不启用无人审核自动合并。
 - 使用 `.github/CODEOWNERS` 和标签区分界面、调度、配置、文档与构建问题。
 
+### 当前仓库设置
+
+2026-09-28 已核实：仓库为 Private，默认分支为 `main`；启用 Issues、Squash 合并、合并后删除分支、Dependabot 漏洞提醒与安全更新，关闭 Wiki 和 Projects。Actions 默认使用只读令牌，不能代替维护者批准 PR。
+
+当前账号方案不支持私有仓库分支保护，GitHub API 返回 403。因此上面的 PR、CI 与讨论要求目前属于协作规范，尚未由服务器强制执行。升级到支持该功能的方案后，应在 `main` 启用 PR 要求、线性历史、讨论解决和以下三个必需状态检查，并禁止强制推送与删除分支：
+
+- `Tests (Python 3.11)`
+- `Tests (Python 3.13)`
+- `Package (Windows x64)`
+
+不要为了启用分支保护而把该私有仓库改为公开。
+
 ## 版本准备
 
 1. 更新 `ace_scheduler/__init__.py`、`assets/brand/version_info.txt`、README 和 CHANGELOG。
