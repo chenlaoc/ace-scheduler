@@ -172,6 +172,17 @@ def test_cpu_dialog_mixed_values_requires_explicit_choice_and_cancel_keeps_draft
     window.close()
 
 
+def test_unsupported_cpu_editor_allows_opt_out_without_enabling_cpu_selection(app):
+    from PySide6.QtWidgets import QPushButton
+    dialog = AffinityDialog(CpuTopology(None, 128, (), 2), [ProcessRule("test.exe")])
+    assert all(not button.isEnabled() for button in dialog.editor.findChildren(QPushButton))
+    dialog.editor.unchanged.click()
+    dialog.accept()
+    assert dialog.chosen_spec.mode == "unchanged"
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    dialog.deleteLater()
+
+
 def test_batch_preset_and_cpu_preserve_row_maintenance_and_unrelated_fields(app, tmp_path):
     window = make_window(tmp_path)
     page = window.policy_page
@@ -180,7 +191,7 @@ def test_batch_preset_and_cpu_preserve_row_maintenance_and_unrelated_fields(app,
     page.set_preset((a, b), "Strong")
     assert page.rule(a).keep_enforced and not page.rule(b).keep_enforced
     page.edit_policy(a, affinity=AffinitySpec("last_n", count=2))
-    assert page.rule(a).policy.priority == "Idle" and page.rule(a).policy.eco
+    assert page.rule(a).policy.priority == "Idle" and page.rule(a).policy.eco == "on"
     assert page.controls[a].preset.currentData() == "Custom"
     page.select_rules("none")
     page.controls[a].select.click()

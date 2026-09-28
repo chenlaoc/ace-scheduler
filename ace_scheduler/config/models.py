@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import copy
 import re
 
 PRIORITIES = {"Idle": 0x40, "Below Normal": 0x4000, "Normal": 0x20,
@@ -8,6 +9,7 @@ PRIORITIES = {"Idle": 0x40, "Below Normal": 0x4000, "Normal": 0x20,
 DEFAULT_NAMES = ("SGuard64.exe", "SGuardSvc64.exe", "ACE-Service64.exe",
                  "SGuardUpdate64.exe", "ACE-Tray.exe")
 INTERVALS = (1, 2, 3, 5, 10)
+ECO_MODES = {"unchanged": "不修改", "system": "系统管理", "on": "开启", "off": "显式关闭"}
 
 
 def process_name(value: str) -> str:
@@ -44,7 +46,7 @@ class AffinitySpec:
         if not isinstance(data, dict):
             raise ValueError("affinity 必须是对象")
         mode = data.get("mode", "all")
-        if mode not in ("all", "last_n", "percentage", "custom"):
+        if mode not in ("unchanged", "all", "last_n", "percentage", "custom"):
             raise ValueError("未知 Affinity 策略")
         cpus = data.get("cpus", [])
         if not isinstance(cpus, (list, tuple)) or len(cpus) > 4096:
@@ -59,24 +61,27 @@ class AffinitySpec:
 class Policy:
     priority: str = "Normal"
     affinity: AffinitySpec = field(default_factory=AffinitySpec)
-    eco: bool = False
+    eco: str = "off"
 
     @classmethod
     def parse(cls, data: dict) -> Policy:
-        if not isinstance(data, dict) or data.get("priority", "Normal") not in PRIORITIES:
+        if not isinstance(data, dict) or data.get("priority", "Normal") not in (*PRIORITIES, "unchanged"):
             raise ValueError("无效 Priority；不允许 Realtime")
+        eco = data.get("eco", "off")
+        if not isinstance(eco, str) or eco not in ECO_MODES:
+            raise ValueError("EcoQoS 必须为 unchanged / system / on / off")
         return cls(data.get("priority", "Normal"),
                    AffinitySpec.parse(data.get("affinity", {})),
-                   boolean(data.get("eco", False), "eco"))
+                   eco)
 
 
 def preset(name: str) -> Policy:
     if name == "Default":
         return Policy()
     if name == "Mild":
-        return Policy("Below Normal", AffinitySpec("percentage", percentage=25, minimum=2), True)
+        return Policy("Below Normal", AffinitySpec("percentage", percentage=25, minimum=2), "on")
     if name == "Strong":
-        return Policy("Idle", AffinitySpec("last_n", count=1), True)
+        return Policy("Idle", AffinitySpec("last_n", count=1), "on")
     raise ValueError("未知预设")
 
 
@@ -115,8 +120,19 @@ class AppConfig:
 
     @classmethod
     def parse(cls, data: dict) -> AppConfig:
-        if not isinstance(data, dict) or data.get("version", 1) != 1:
+        if not isinstance(data, dict) or type(data.get("version", 1)) is not int or data.get("version", 1) not in (1, 2):
             raise ValueError("配置版本不支持")
+        if data.get("version", 1) == 1:
+            data = copy.deepcopy(data)
+            # Legacy false means explicitly off, never system-managed or unchanged.
+            raw_rules = data.get("rules", [])
+            if isinstance(raw_rules, list):
+                for rule in raw_rules:
+                    if isinstance(rule, dict):
+                        policy = rule.setdefault("policy", {})
+                        if isinstance(policy, dict):
+                            policy["eco"] = "on" if boolean(policy.get("eco", False), "eco") else "off"
+            data["version"] = 2
         raw = data.get("rules", [asdict(ProcessRule(n)) for n in DEFAULT_NAMES])
         if not isinstance(raw, list) or len(raw) > 256:
             raise ValueError("规则列表无效或超过 256 条")
@@ -125,6 +141,8 @@ class AppConfig:
             raise ValueError("进程规则名称重复（不区分大小写）")
         keys = {r.key for r in rules}
         rules.extend(ProcessRule(n, enabled=False) for n in DEFAULT_NAMES if n.casefold() not in keys)
+        if len(rules) > 256:
+            raise ValueError("补齐内置规则后超过 256 条（上限包含内置规则）")
         monitor = integer(data.get("monitor_interval", 1), 1, 10, "监控间隔")
         enforce = integer(data.get("enforce_interval", 3), 1, 10, "维护间隔")
         geometry = data.get("geometry", "")
@@ -136,4 +154,4 @@ class AppConfig:
         return cls(rules, monitor, enforce, geometry, boolean(data.get("close_to_tray", False), "close_to_tray"), theme)
 
     def to_dict(self) -> dict:
-        return {"version": 1, **asdict(self)}
+        return {"version": 2, **asdict(self)}

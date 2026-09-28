@@ -6,15 +6,16 @@ from dataclasses import dataclass, replace
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QHeaderView,
                                QHBoxLayout, QInputDialog, QMessageBox, QPushButton,
-                               QTableWidget, QVBoxLayout, QWidget)
+                               QTableWidget, QVBoxLayout, QWidget, QPlainTextEdit, QDialogButtonBox)
 
-from ace_scheduler.config.models import ProcessRule, preset, process_name
+from ace_scheduler.config.models import ECO_MODES, ProcessRule, preset, process_name
+from ace_scheduler.core.policy import preview_policy, resolve_targets
 from ..affinity_dialog import AffinityDialog
 from ..components import GlassCard, Switch, label
 from .base import Page
 
 PRESET_NAMES = (("默认", "Default"), ("温和", "Mild"), ("较强", "Strong"), ("自定义", "Custom"))
-PRIORITY_NAMES = (("空闲", "Idle"), ("低于正常", "Below Normal"), ("正常", "Normal"),
+PRIORITY_NAMES = (("不修改", "unchanged"), ("空闲", "Idle"), ("低于正常", "Below Normal"), ("正常", "Normal"),
                   ("高于正常", "Above Normal"), ("高", "High"))
 
 
@@ -25,7 +26,7 @@ class RuleControls:
     preset: QComboBox
     priority: QComboBox
     cpu: QPushButton
-    eco: Switch
+    eco: QComboBox
     keep: Switch
     enabled: Switch
 
@@ -70,10 +71,14 @@ class PolicyPage(Page):
         self.cpu_button = QPushButton("CPU 分配…")
         self.cpu_button.clicked.connect(lambda: self.edit_affinity(self.selected_keys()))
         toolbar.addWidget(self.cpu_button)
+        self.preview_button = QPushButton("预览勾选…")
+        self.preview_button.clicked.connect(self.show_preview)
+        toolbar.addWidget(self.preview_button)
         self.bulk_keep = QComboBox()
         self.bulk_keep.addItem("维护方式…", None)
         self.bulk_keep.addItem("仅应用一次", False)
         self.bulk_keep.addItem("持续维护", True)
+        self.bulk_keep.setToolTip("仅应用一次：对每个新实例应用一次，本次会话内有效。")
         self.bulk_keep.setAccessibleName("统一设置勾选规则的维护方式")
         self.bulk_keep.activated.connect(self.set_bulk_keep)
         toolbar.addWidget(self.bulk_keep)
@@ -92,7 +97,7 @@ class PolicyPage(Page):
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for index, width in enumerate((190, 96, 104, 108, 64, 76, 62)):
+        for index, width in enumerate((190, 96, 104, 108, 108, 76, 62)):
             self.table.setColumnWidth(index, width)
         card.body.addWidget(self.table)
         card.body.addWidget(label("勾选左侧的进程后，可一起保存或应用。右侧“监控”开关控制规则是否启用，每行参数也可以单独修改。", "muted", True))
@@ -185,8 +190,13 @@ class PolicyPage(Page):
             cpu = QPushButton()
             cpu.setAccessibleName(base.name + " CPU 分配")
             cpu.clicked.connect(lambda checked=False, key=key: self.edit_affinity((key,)))
-            eco, keep, enabled = (Switch(base.name + " " + title) for title in ("EcoQoS", "持续维护", "监控"))
-            eco.clicked.connect(lambda value, key=key: self.edit_policy(key, eco=value))
+            eco = QComboBox()
+            for value, title in ECO_MODES.items():
+                eco.addItem(title, value)
+            eco.setAccessibleName(base.name + " EcoQoS")
+            eco.setToolTip("不修改：本次不接管；系统管理：交还系统；显式关闭：强制关闭节能提示。")
+            eco.activated.connect(lambda _, key=key: self.edit_policy(key, eco=self.controls[key].eco.currentData()))
+            keep, enabled = (Switch(base.name + " " + title) for title in ("持续维护", "监控"))
             keep.clicked.connect(lambda value, key=key: self.stage(replace(self.rule(key), keep_enforced=value)))
             enabled.clicked.connect(lambda value, key=key: self.stage(replace(self.rule(key), enabled=value)))
             controls = RuleControls(selected, status, presets, priority, cpu, eco, keep, enabled)
@@ -202,13 +212,16 @@ class PolicyPage(Page):
         name = next((name for _, name in PRESET_NAMES[:3] if preset(name) == rule.policy), "Custom")
         widgets.preset.setCurrentIndex(widgets.preset.findData(name))
         widgets.priority.setCurrentIndex(widgets.priority.findData(rule.policy.priority))
-        widgets.priority.setToolTip(rule.policy.priority)
-        widgets.eco.setChecked(rule.policy.eco)
+        widgets.priority.setToolTip(widgets.priority.currentText())
+        widgets.eco.setCurrentIndex(widgets.eco.findData(rule.policy.eco))
         widgets.keep.setChecked(rule.keep_enforced)
         widgets.enabled.setChecked(rule.enabled)
         topology = self.owner.topology
         spec = rule.policy.affinity
-        if topology and topology.affinity_supported:
+        if spec.mode == "unchanged":
+            widgets.cpu.setText("不修改")
+            widgets.cpu.setToolTip("本次不接管 CPU 分配；不恢复之前已经修改的值。")
+        elif topology and topology.affinity_supported:
             try:
                 cpus = topology.resolve(spec)
                 text = f"全部 · {len(cpus)}" if spec.mode == "all" else f"最后 {spec.count} 个" if spec.mode == "last_n" else f"{spec.percentage}% · {len(cpus)}" if spec.mode == "percentage" else f"自选 · {len(cpus)}"
@@ -220,7 +233,7 @@ class PolicyPage(Page):
         else:
             widgets.cpu.setText("不支持" if topology else "检测中…")
             widgets.cpu.setToolTip(topology.limitation if topology else "正在检测 CPU")
-        widgets.cpu.setEnabled(bool(topology and topology.affinity_supported))
+        widgets.cpu.setEnabled(bool(topology))
 
     def select_key(self, key, checked):
         self.selected.add(key) if checked else self.selected.discard(key)
@@ -272,12 +285,44 @@ class PolicyPage(Page):
         self.refresh_status()
 
     def edit_affinity(self, keys):
-        if not keys or not self.owner.topology or not self.owner.topology.affinity_supported:
+        if not keys or not self.owner.topology:
             return
         dialog = AffinityDialog(self.owner.topology, [self.rule(key) for key in keys], self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             for key in keys:
                 self.edit_policy(key, affinity=dialog.chosen_spec)
+        dialog.deleteLater()
+
+    def preview_text(self):
+        blocks = []
+        for key in self.selected_keys():
+            rule = self.rule(key)
+            try:
+                detail = preview_policy(rule.policy, self.owner.topology)
+            except ValueError as exc:
+                detail = "无法应用：" + str(exc)
+            mode = "持续维护" if rule.keep_enforced else "对每个新实例应用一次，本次会话内有效"
+            blocks.append(f"{rule.name}" + ("（已停用，应用时跳过）" if not rule.enabled else "")
+                          + f"\n{detail}\n维护方式：{mode}")
+        return ("预览使用当前草稿和本机 CPU 拓扑，不执行调度操作。\n"
+                "不修改：本次不接管该字段；不会恢复此前修改过的值。\n"
+                "默认预设：Normal / All / 显式关闭；恢复原设置：恢复每个实例保存的原值。\n\n"
+                + "\n\n".join(blocks))
+
+    def show_preview(self):
+        if not self.selected_keys() or not self.owner.topology:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("策略预览")
+        dialog.resize(660, 470)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(self.preview_text())
+        text.setReadOnly(True)
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
         dialog.deleteLater()
 
     def discard_selected(self):
@@ -305,8 +350,7 @@ class PolicyPage(Page):
             return
         try:
             for key in keys:
-                if self.owner.topology.affinity_supported:
-                    self.owner.topology.resolve(self.rule(key).policy.affinity)
+                resolve_targets(self.rule(key).policy, self.owner.topology)
         except ValueError as exc:
             QMessageBox.warning(self, "CPU 选择无效", self.rule(key).name + "：" + str(exc))
             return
@@ -382,7 +426,8 @@ class PolicyPage(Page):
         self.table.setEnabled(not pending)
         for button in (*self.preset_buttons.values(), self.bulk_keep):
             button.setEnabled(bool(keys) and not pending)
-        self.cpu_button.setEnabled(bool(keys and self.owner.topology and self.owner.topology.affinity_supported and not pending))
+        self.cpu_button.setEnabled(bool(keys and self.owner.topology and not pending))
+        self.preview_button.setEnabled(bool(keys and self.owner.topology and not pending))
         for button in self.selection_buttons:
             button.setEnabled(not pending)
         saved = {rule.key: rule for rule in self.owner.config.rules}

@@ -127,3 +127,38 @@ def test_corrupt_journal_cannot_report_successful_restore(tmp_path):
     path.write_text("invalid")
     engine = MonitorEngine(start(path), AppConfig())
     assert not engine.restore()
+
+
+def test_confirm_save_failure_never_becomes_success_on_unchanged_retry(tmp_path, monkeypatch):
+    path = tmp_path / "recovery.json"
+    scheduler = start(path)
+    save = scheduler.journal._save
+    failed = False
+
+    def fail_confirmation_once(records):
+        nonlocal failed
+        if not failed and not records[KEY]["fields"]["priority"]["pending"]:
+            failed = True
+            raise OSError("injected confirm save failure")
+        save(records)
+
+    monkeypatch.setattr(scheduler.journal, "_save", fail_confirmation_once)
+    result = scheduler.apply(KEY, preset("Strong"))
+    priority = next(op for op in result.operations if op.field == "priority")
+    assert not result.ok and "已暂停" in result.status
+    assert priority.changed and priority.write_succeeded and priority.verified
+    assert priority.recovery_pending and "设置已改变" in priority.message
+    assert scheduler.journal.entry(KEY, "priority")["pending"]
+    writes = list(scheduler.api.writes)
+    for candidate in (scheduler, start(path, scheduler.api)):
+        result = candidate.apply(KEY, preset("Strong"))
+        assert not result.ok and "待确认" in result.status and "已验证" not in result.status
+        assert candidate.api.writes == writes
+        assert candidate.journal.entry(KEY, "priority")["pending"]
+    scheduler.api.values[KEY]["priority"] = 0x4000
+    assert not scheduler.apply(KEY, preset("Mild")).ok
+    assert scheduler.api.writes == writes
+    assert not scheduler.restore(KEY).ok
+    assert scheduler.restore(KEY, force=True).ok
+    assert not scheduler.pending_fields(KEY)
+    assert scheduler.apply(KEY, preset("Strong")).ok

@@ -43,9 +43,38 @@ def test_readonly_and_processor_group_warning(app, tmp_path):
     window.on_ready(CpuTopology(None, 128, (), 2))
     assert not window.policy_page.apply_button.isEnabled()
     assert "仅支持单 Processor Group" in window.banner.text()
-    assert not window.policy_page.cpu_button.isEnabled()
-    assert all(not row.cpu.isEnabled() for row in window.policy_page.controls.values())
+    # The editor remains accessible to select "unchanged" on unsupported machines.
+    assert window.policy_page.cpu_button.isEnabled()
+    assert all(row.cpu.isEnabled() for row in window.policy_page.controls.values())
     window.close()
+
+
+@pytest.mark.parametrize("scenario", ["pending", "partial"])
+def test_pending_and_partial_status_are_visible_in_process_table(app, tmp_path, monkeypatch, scenario):
+    from ace_scheduler.core.recovery import RecoveryJournal
+    from ace_scheduler.ui.process_table import ProcessTable
+    from tests.test_monitor import setup
+    engine, _, clock = setup(keep=True)
+    if scenario == "pending":
+        engine.scheduler.journal = RecoveryJournal(tmp_path / "recovery.json")
+        def fail(*args):
+            raise OSError("confirm failed")
+        monkeypatch.setattr(engine.scheduler.journal, "confirm", fail)
+    else:
+        engine.scheduler.topology = CpuTopology(None, 128, (), 2)
+    engine.arm("test.exe")
+    table = ProcessTable()
+    try:
+        for _ in range(2):
+            table.update_rows(engine.scan())
+            status = table.item(0, 11).text()
+            assert ("待确认" if scenario == "pending" else "部分成功") in status
+            assert "已验证" not in status
+            assert status in table.item(0, 11).toolTip()
+            clock[0] += 60
+            engine.enforce()
+    finally:
+        table.deleteLater()
 
 
 def test_worker_start_and_asynchronous_clean_shutdown(app, tmp_path):
@@ -94,7 +123,7 @@ def test_navigation_and_preview_never_apply_until_requested(app, tmp_path):
         app.processEvents()
         assert window.pages.currentIndex() == index
         assert window.policy_page.footer.isVisible() == (index == 1)
-        assert window.process_picker.isVisible() == (index in (0, 2))
+        assert window.process_picker.isVisible() == (index == 0)
     window.policy_page.preset_buttons["Strong"].click()
     window.on_snapshot([], set(), 0)
     assert requests == []

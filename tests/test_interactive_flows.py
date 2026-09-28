@@ -119,10 +119,11 @@ def test_row_keyboard_edit_and_partial_save_survive_navigation(window):
     a, b, *_ = page.selected_keys()
     choose(page.controls[a].preset, "Strong")
     choose(page.controls[b].priority, "Below Normal")
-    click(page.controls[b].eco)
+    choose(page.controls[b].eco, "on")
     click(page.controls[b].keep)
     assert page.rule(a).policy == preset("Strong")
     assert page.rule(b).policy.priority == "Below Normal" and page.rule(b).keep_enforced
+    assert page.rule(b).policy.eco == "on"
     click(page.selection_buttons[2])
     assert not page.save_button.isEnabled()
     click(page.controls[a].select)
@@ -138,6 +139,45 @@ def test_row_keyboard_edit_and_partial_save_survive_navigation(window):
     click(page.selection_buttons[0])
     click(page.discard_button)
     assert not page.drafts and page.rule(b).policy == preset("Default")
+
+
+@pytest.mark.parametrize("size", [(1280, 860), (1040, 700)])
+def test_single_field_controls_preview_and_save_without_applying(window, size):
+    from PySide6.QtWidgets import QPlainTextEdit
+    window.resize(*size)
+    window.show_page(1)
+    page = window.policy_page
+    key = page.selected_keys()[0]
+    commands = []
+    window.apply_many_requested.connect(commands.append)
+    click(page.selection_buttons[2])
+    click(page.controls[key].select)
+    choose(page.controls[key].priority, "unchanged")
+
+    def cpu_unchanged(dialog):
+        click(dialog.editor.unchanged)
+        assert dialog.editor.value().mode == "unchanged"
+        click(dialog.confirm)
+    in_modal(cpu_unchanged, lambda: click(page.controls[key].cpu))
+    for eco in ("on", "off", "unchanged", "system"):
+        choose(page.controls[key].eco, eco)
+        assert page.rule(key).policy.eco == eco
+
+    def check_preview(dialog):
+        text = dialog.findChild(QPlainTextEdit)
+        assert text.isReadOnly()
+        assert "Priority：不修改" in text.toPlainText()
+        assert "Affinity：不修改" in text.toPlainText()
+        assert "EcoQoS：系统管理" in text.toPlainText()
+        assert "对每个新实例应用一次" in text.toPlainText()
+        dialog.reject()
+    in_modal(check_preview, lambda: click(page.preview_button))
+    assert not commands and not window.manager.path.exists()
+    click(page.save_button)
+    config, warning = window.manager.load()
+    assert not warning and not commands
+    assert config.rules[0].policy == page.rule(key).policy
+    assert config.rules[0].policy.affinity.mode == "unchanged"
 
 
 def test_cpu_modal_invalid_confirm_then_valid_and_escape(window):
@@ -338,7 +378,7 @@ def test_export_actual_file_dialog_before_after_cancel_and_failure(window, tmp_p
     identity = ProcessIdentity(123, 100, "test.exe")
     window.on_snapshot([ProcessRow(identity.name, identity.pid, identity, Metrics(10, 1, 2, 3, sample_seconds=1))], set(), 0)
     window.on_applied(identity, 10.5, "test operation")
-    window.on_snapshot([ProcessRow(identity.name, identity.pid, identity, Metrics(11, 4, 5, 6, sample_seconds=1))], set(), 0)
+    window.on_snapshot([ProcessRow(identity.name, identity.pid, identity, Metrics(15, 4, 5, 6, sample_seconds=1))], set(), 0)
     # Force Qt's file dialog so it can be driven by Qt events on all runners.
     original = QFileDialog.getSaveFileName
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: original(*args, options=QFileDialog.Option.DontUseNativeDialog))
@@ -353,13 +393,66 @@ def test_export_actual_file_dialog_before_after_cancel_and_failure(window, tmp_p
     in_modal(save, lambda: click(window.export_button))
     with output.open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream))
-    assert [row["phase"] for row in rows] == ["before", "after"]
-    assert [row["cpu_percent_machine"] for row in rows] == ["1", "4"]
+    assert rows[0]["row_type"] == "metadata" and rows[-1]["row_type"] == "event"
+    samples = [row for row in rows if row["row_type"] == "sample"]
+    assert [row["phase"] for row in samples] == ["before", "after"]
+    assert [row["cpu_percent_machine"] for row in samples] == ["1", "4"]
     original_bytes = output.read_bytes()
     in_modal(lambda dialog: QTest.keyClick(dialog, Qt.Key.Key_Escape), lambda: click(window.export_button))
     assert output.read_bytes() == original_bytes
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path), "CSV"))
     in_modal(warning_close, lambda: click(window.export_button))
+
+
+@pytest.mark.parametrize("size", [(1280, 860), (1040, 700)])
+def test_finished_instance_select_save_reopen_and_no_scheduling(window, tmp_path, monkeypatch, size):
+    from tests.test_experiment import completed
+    window.resize(*size)
+    history, session = completed()
+    window.history = history
+    window.selected_experiment = session.id
+    window.on_snapshot([], set(), 0)
+    window.show_page(2)
+    page = window.experiment_page
+    assert window.selected_identity is None
+    choose(page.filter, "ended")
+    assert window.current_experiment().id == session.id
+    assert window.export_button.isEnabled() and page.save_button.isEnabled()
+    assert not page.begin_button.isEnabled()
+    path = tmp_path / "finished.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_: (str(path), "JSON"))
+    window.save_experiment()
+    assert path.exists()
+    commands = []
+    window.apply_many_requested.connect(commands.append)
+    window.restore_requested.connect(commands.append)
+    from ace_scheduler.core.experiment import History
+    window.history = History()
+    window.selected_experiment = None
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_: (str(path), "JSON"))
+    click(page.open_button)
+    assert window.current_experiment().imported
+    assert window.current_experiment().report() == session.report()
+    assert not commands
+
+
+def test_recording_continues_when_window_hidden_and_restore_does_not_replace_session(window):
+    from tests.test_experiment import event, KEY, A, B
+    from dataclasses import asdict
+    window.background_hidden = True
+    for t in range(1, 61):
+        window.on_record({"kind": "sample", "identity": asdict(KEY), "metrics": asdict(Metrics(t, read_mbps=2, sample_seconds=1)), "state": A})
+    window.on_record(event())
+    session = window.history.experiments[KEY]
+    for t in range(61, 124):
+        window.on_record({"kind": "sample", "identity": asdict(KEY), "metrics": asdict(Metrics(t, read_mbps=1, sample_seconds=1)), "state": B})
+    before = session.report()
+    window.on_record(event(124, "restore", before=B, after=A))
+    assert session.report() == before and session.state == "completed"
+    assert len(window.history.sessions) == 1
+    window.background_hidden = False
+    window.on_snapshot([], set(), 0)
+    assert window.export_button.isEnabled()
 
 
 def test_log_cap_clear_and_keyboard_caption(window):

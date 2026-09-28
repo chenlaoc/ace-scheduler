@@ -142,3 +142,19 @@ def test_failed_worker_still_allows_explicit_keep_and_exit(window, monkeypatch):
     monkeypatch.setattr(window, "_shutdown", lambda: shutdown.append(True))
     in_modal(lambda dialog: click(button(dialog, "保留当前设置并退出")), window.close)
     assert shutdown == [True]
+
+
+def test_packaged_diagnostics_preserve_embedded_build_provenance(tmp_path, monkeypatch):
+    from ace_scheduler import diagnostics
+    from ace_scheduler.build_metadata import BUILD_DEPENDENCIES
+    build = {"version": __version__, "commit": "d" * 40, "dirty": True,
+             "dependencies": {name: "1.2.3" for name in BUILD_DEPENDENCIES},
+             "requirements_sha256": "e" * 64}
+    (tmp_path / "build-info.json").write_text(json.dumps(build), encoding="utf-8")
+    monkeypatch.setattr(diagnostics, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    diagnostics.build_info.cache_clear()
+    try:
+        assert diagnostics.build_info() == {**build, "distribution": "packaged"}
+    finally:
+        diagnostics.build_info.cache_clear()

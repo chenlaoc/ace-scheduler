@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import logging
 import time
 
@@ -8,9 +8,12 @@ import psutil
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from ace_scheduler.config.models import AppConfig
+from ace_scheduler import __version__
+from ace_scheduler.diagnostics import build_info
 from .cpu_topology import CpuTopology
 from .process_metrics import Counters, Metrics, MetricsSampler, ProcessIdentity
 from .scheduler import ScheduleState, Scheduler, error_text
+from ace_scheduler.windows.file_info import file_version
 
 
 @dataclass
@@ -26,11 +29,15 @@ class ProcessRow:
 class MonitorEngine:
     """Single-threaded engine. Worker owns it; UI sends queued commands."""
     def __init__(self, scheduler: Scheduler, config: AppConfig, emit_log=lambda _: None,
-                 emit_applied=lambda *_: None, iterator=None, process_factory=None, clock=time.monotonic):
+                 emit_applied=lambda *_: None, iterator=None, process_factory=None, clock=time.monotonic,
+                 emit_record=lambda _: None):
         self.scheduler = scheduler
         self.config = config
         self.log = emit_log
         self.applied = emit_applied
+        self.record = emit_record
+        self.target_info = {}
+        self.build = build_info()
         self.iterator = iterator or psutil.process_iter
         self.process_factory = process_factory or psutil.Process
         self.clock = clock
@@ -44,7 +51,37 @@ class MonitorEngine:
         self.rows: list[ProcessRow] = []
         self.last_errors: dict[ProcessIdentity, str] = {}
 
+    def event(self, kind, reason, identity=None):
+        self.record({"kind": kind, "timestamp": self.clock(), "reason": reason,
+                     "identity": asdict(identity) if identity else None})
+
+    def context(self, identity):
+        return {"app_version": __version__, "app_build": self.build,
+                "target": self.target_info.get(identity, {"version": None}),
+                "topology": asdict(self.scheduler.topology), "sampling": {
+                    "monitor_interval": self.config.monitor_interval,
+                    "enforce_interval": self.config.enforce_interval,
+                    "clock": "monotonic", "CPU": "machine-normalized", "MB": 1_000_000}}
+
+    def operate(self, identity, policy=None, *, restore=False, force=False, maintenance=False):
+        before = self.scheduler.inspect(identity)
+        started = self.clock()
+        result = self.scheduler.restore(identity, force=force) if restore else self.scheduler.apply(identity, policy)
+        ended = self.clock()
+        after = self.scheduler.inspect(identity)
+        self.record({"kind": "restore" if restore else "maintenance" if maintenance else "apply",
+            "identity": asdict(identity), "timestamp": started, "ended": ended,
+            "utc_offset": time.time() - self.clock(), "policy": asdict(policy) if policy else None,
+            "before": asdict(before), "after": asdict(after), "force": force,
+            "result": {"ok": result.ok, "status": result.status, "operations": [asdict(op) for op in result.operations]},
+            "context": self.context(identity)})
+        if restore or not maintenance or any(op.changed for op in result.operations):
+            self.sampler.previous.pop(identity, None)
+        return result
+
     def configure(self, config: AppConfig) -> None:
+        if (config.monitor_interval, config.enforce_interval) != (self.config.monitor_interval, self.config.enforce_interval):
+            self.event("sampling_changed", "采样或维护间隔改变")
         old = {r.key: r for r in self.config.rules}
         self.config = config
         new = {r.key: r for r in config.rules}
@@ -64,6 +101,9 @@ class MonitorEngine:
 
     def disarm(self, key: str) -> None:
         self.armed.pop(key, None)
+        for identity in self.known:
+            if identity.name.casefold() == key:
+                self.event("rule_stopped", "规则停止或编辑", identity)
         for identity in list(self.outcomes):
             if identity.name.casefold() == key:
                 self.outcomes.pop(identity, None)
@@ -82,7 +122,7 @@ class MonitorEngine:
         for identity in list(self.scheduler.originals):
             if key is not None and identity.name.casefold() != key:
                 continue
-            result = self.scheduler.restore(identity, force=force)
+            result = self.operate(identity, restore=True, force=force)
             success = result.ok and success
             self.outcomes[identity] = "已恢复原设置" if result.ok else result.status
             for operation in result.operations:
@@ -117,16 +157,30 @@ class MonitorEngine:
                 row.identity = identity
                 if identity not in self.known:
                     self.log(f"{name} PID={identity.pid} create_time={identity.created:.6f} detected")
+                    try:
+                        path = process.exe() if hasattr(process, "exe") else None
+                    except (psutil.Error, OSError):
+                        path = None
+                    try:
+                        version = file_version(path)
+                    except OSError:
+                        version = None
+                    self.target_info[identity] = {"executable_path": path, "version": version,
+                                                  "version_note": "实例发现时读取文件版本资源；无法读取时为 null"}
                 row.metrics, metric_errors = self._metrics(process, identity)
                 row.state = self.scheduler.inspect(identity)
+                self.record({"kind": "sample", "identity": asdict(identity),
+                             "metrics": asdict(row.metrics), "state": asdict(row.state), "metric_errors": metric_errors,
+                             "context": self.context(identity)})
                 rule = rules.get(name.casefold())
                 generation = self.armed.get(name.casefold())
                 now = self.clock()
+                pause_reason = self.scheduler.pause_reason(identity)
                 if rule and generation is not None:
                     new_attempt = self.attempted.get(identity) != generation
                     due = rule.keep_enforced and now >= self.next_enforce.get(identity, 0)
-                    if new_attempt or due:
-                        result = self.scheduler.apply(identity, rule.policy)
+                    if not pause_reason and (new_attempt or due):
+                        result = self.operate(identity, rule.policy, maintenance=not new_attempt)
                         self.attempted[identity] = generation
                         self.next_enforce[identity] = now + (self.config.enforce_interval if result.ok else max(30, self.config.enforce_interval))
                         status = result.status
@@ -141,6 +195,10 @@ class MonitorEngine:
                     row.status = ("Keep Enforced · " if rule.keep_enforced else "Apply Once · ") + self.outcomes.get(identity, "等待应用")
                 else:
                     row.status = self.outcomes.get(identity, "仅监控")
+                # Pending recovery is durable state, even after disarming/rearming.
+                pause_reason = self.scheduler.pause_reason(identity)
+                if pause_reason:
+                    row.status = pause_reason
                 errors = metric_errors + list(row.state.errors.values())
                 if errors:
                     message = " | ".join(dict.fromkeys(errors))
@@ -160,14 +218,16 @@ class MonitorEngine:
         retained = found | {i for i in self.known | set(self.scheduler.originals) if i.pid in uncertain_pids}
         for identity in self.known - retained:
             self.log(f"{identity.name} PID={identity.pid} exited / 已不再是原进程实例")
+            self.event("process_ended", "实例退出或不再监控", identity)
         self.known = retained
         self.sampler.retain(found)
         self.scheduler.retain(retained)
-        for mapping in (self.attempted, self.next_enforce, self.outcomes, self.last_errors):
+        for mapping in (self.attempted, self.next_enforce, self.outcomes, self.last_errors, self.target_info):
             for identity in list(mapping):
                 if identity not in retained:
                     del mapping[identity]
         self.rows = rows
+        self.record({"kind": "tick", "timestamp": self.clock()})
         return rows
 
     def enforce(self) -> bool:
@@ -176,9 +236,13 @@ class MonitorEngine:
         rules = {r.key: r for r in self.config.rules if r.enabled and r.keep_enforced}
         for identity in tuple(self.known):
             key = identity.name.casefold()
+            pause_reason = self.scheduler.pause_reason(identity)
+            if pause_reason:
+                self.outcomes[identity] = pause_reason
+                continue
             if key not in self.armed or key not in rules or self.clock() < self.next_enforce.get(identity, 0):
                 continue
-            result = self.scheduler.apply(identity, rules[key].policy)
+            result = self.operate(identity, rules[key].policy, maintenance=True)
             self.next_enforce[identity] = self.clock() + (self.config.enforce_interval if result.ok else max(30, self.config.enforce_interval))
             if result.status != self.outcomes.get(identity) or any(op.changed for op in result.operations):
                 for operation in result.operations:
@@ -209,6 +273,11 @@ class MonitorEngine:
         if not process.is_running():
             raise psutil.NoSuchProcess(process.pid)
         counters = Counters(self.clock(), **values)
+        previous = self.sampler.previous.get(identity)
+        if previous and any(getattr(previous, name) is not None and getattr(counters, name) is not None
+                            and getattr(counters, name) < getattr(previous, name)
+                            for name in ("cpu_seconds", "read_bytes", "write_bytes", "read_count", "write_count")):
+            self.event("counter_reset", "累计计数器回退，相关区间不可用", identity)
         return self.sampler.sample(identity, counters), errors
 
 
@@ -217,6 +286,7 @@ class MonitorWorker(QObject):
     snapshot = Signal(object, object, int)
     log_line = Signal(str)
     applied = Signal(object, float, str)
+    recorded = Signal(object)
     restore_done = Signal(bool)
     command_done = Signal()
     recovery_notice = Signal(str)
@@ -246,6 +316,7 @@ class MonitorWorker(QObject):
         if self.engine:
             try:
                 self.engine.armed.clear()
+                self.engine.event("worker_failed", message)
                 for row in self.engine.rows:
                     row.status = "后台已停止 · " + message
                 self._publish()
@@ -272,7 +343,7 @@ class MonitorWorker(QObject):
             topology = CpuTopology.detect()
             journal = RecoveryJournal(self.recovery_path) if self.recovery_path else None
             self.engine = MonitorEngine(Scheduler(WindowsProcessApi(), topology, journal), self.config,
-                                        self._log, self.applied.emit)
+                                        self._log, self.applied.emit, emit_record=self.recorded.emit)
             if journal and journal.warning:
                 self._log(journal.warning)
                 self.recovery_notice.emit(journal.warning)
@@ -303,6 +374,7 @@ class MonitorWorker(QObject):
             if now - self.last_scan > max(15, self.config.monitor_interval * 3):
                 self.engine.sampler.previous.clear()
                 self.engine.next_enforce.clear()
+                self.engine.event("sampling_reset", "长时间暂停后重新采样")
                 self._log("长时间暂停后重新采样；指标基线已重置")
             self.last_scan = now
             self.engine.scan()
@@ -418,7 +490,9 @@ class MonitorWorker(QObject):
             if self.engine:
                 self.engine.armed.clear()
                 self.engine.scheduler.abandon()
-                self._publish()
+                self.engine.event("recovery_abandoned", "恢复记录已归档，保留当前设置")
+                self.engine.outcomes.clear()
+                self.scan()
                 self.recovery_notice.emit("已保留当前调度值，恢复记录已归档。")
         except Exception as exc:
             self.recovery_notice.emit("归档恢复记录失败：" + error_text(exc))
@@ -433,12 +507,15 @@ class MonitorWorker(QObject):
                 journal = self.engine.scheduler.journal
                 if not journal or not journal.blocked:
                     self.engine.scheduler.abandon()
+                    self.engine.event("recovery_abandoned", "退出时保留当前设置并归档恢复记录")
             self.stop()
         except Exception as exc:
             self.finish_failed.emit("保存退出决定失败，仍保留恢复记录：" + error_text(exc))
 
     @Slot()
     def stop(self):
+        if self.engine and hasattr(self.engine, "event"):
+            self.engine.event("recording_stopped", "后台记录停止")
         if self.monitor_timer:
             self.monitor_timer.stop()
         if self.enforce_timer:

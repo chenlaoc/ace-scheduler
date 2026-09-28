@@ -1,5 +1,5 @@
 from PySide6.QtCore import Signal, Qt
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QScrollArea
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QScrollArea, QCheckBox
 
 from ace_scheduler.config.models import AffinitySpec
 from .components import label
@@ -18,6 +18,9 @@ class AffinityWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
+        self.unchanged = QCheckBox("不修改 CPU 分配（本次不接管）")
+        self.unchanged.toggled.connect(self.toggle_unchanged)
+        layout.addWidget(self.unchanged)
         presets = QHBoxLayout()
         presets.setSpacing(5)
         for text, spec in (("全部", AffinitySpec()), ("清空", AffinitySpec("custom")),
@@ -78,12 +81,17 @@ class AffinityWidget(QWidget):
         self.set_spec(spec)
         self.changed.emit()
 
+    def toggle_unchanged(self, checked):
+        if not self.loading:
+            self.choose(AffinitySpec("unchanged") if checked else AffinitySpec())
+
     def set_spec(self, spec):
         self.loading = True
         self.spec = spec
+        self.unchanged.setChecked(spec.mode == "unchanged")
         try:
-            ids = self.topology.resolve(spec) if self.topology.affinity_supported else ()
-            message = f"已选择 {len(ids)} / {len(self.topology.available)} 个逻辑处理器"
+            ids = self.topology.resolve(spec) if self.topology.affinity_supported and spec.mode != "unchanged" else ()
+            message = "不修改 CPU 分配；已有恢复记录保留。" if spec.mode == "unchanged" else f"已选择 {len(ids)} / {len(self.topology.available)} 个逻辑处理器"
             invalid = set(spec.cpus) - set(self.topology.available)
             if spec.mode == "custom" and invalid:
                 message += f" · 已过滤无效 ID {sorted(invalid)}"
@@ -91,7 +99,7 @@ class AffinityWidget(QWidget):
             ids, message = (), str(exc)
         for cpu, button in self.checks.items():
             button.setChecked(cpu in ids)
-        self.description.setText(message if self.topology.affinity_supported else self.topology.limitation)
+        self.description.setText(message if self.topology.affinity_supported or spec.mode == "unchanged" else self.topology.limitation)
         self.loading = False
 
     def manual(self):
@@ -99,10 +107,13 @@ class AffinityWidget(QWidget):
             return
         ids = tuple(cpu for cpu, button in self.checks.items() if button.isChecked())
         self.spec = AffinitySpec("custom", cpus=ids)
+        self.unchanged.blockSignals(True)
+        self.unchanged.setChecked(False)
+        self.unchanged.blockSignals(False)
         self.description.setText(f"已选择 {len(ids)} 个逻辑处理器 · 自定义" if ids else "至少选择一个 CPU 才能应用")
         self.changed.emit()
 
     def value(self):
-        if self.topology.affinity_supported:
+        if self.topology.affinity_supported and self.spec.mode != "unchanged":
             self.topology.resolve(self.spec)
         return self.spec
