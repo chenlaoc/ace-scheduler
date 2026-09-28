@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml"><img src="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml/badge.svg" alt="Windows CI"></a>
-  <br>Windows x64 · Python 3.11+ · PySide6 · v1.5.1
+  <br>Windows x64 · Python 3.11+ · PySide6 · v1.6.0
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@ ACE Scheduler 可以查看 Windows **用户态进程**的资源占用，调整 C
 | --- | --- |
 | **运行概览** | 选择进程，查看它占整机的 CPU 比例、内存、进程 I/O 和当前调度设置 |
 | **调度策略** | 直接逐行修改，或勾选多行统一设置 Priority、CPU Affinity、EcoQoS 与维护方式 |
-| **实验对照** | 保留应用前的数据，与应用后最近 60 秒比较，导出 CSV |
+| **实验对照** | 独立会话与固定窗口，复查已结束实例，保存／打开 JSON，导出含策略和事件的 CSV |
 | **设置与日志** | 设置采样间隔和关闭方式，恢复异常退出前的设置，重启后台或导出脱敏诊断 |
 | **关于** | 查看版本、构建信息和许可，打开配置目录，前往 GitHub 查看更新或反馈问题 |
 
@@ -71,6 +71,8 @@ py -3.13 -m venv .venv
 开发环境、构建命令和模块说明见 [开发指南](docs/DEVELOPMENT.md)。
 
 ## 调度方式
+
+v1.6.0 支持按字段“不修改”：Priority 与 CPU 分配可单独不接管；EcoQoS 可选“不修改 / 系统管理 / 开启 / 显式关闭”。点击“预览勾选…”可以先核对草稿和本机 CPU ID，再决定是否应用。旧配置保留原语义迁移到 v2，首次保存前备份原文件。详见[单字段操作与迁移说明](docs/USER_GUIDE.md)。实验记录需在退出前手动保存 JSON，之后可重新打开复查。
 
 | 预设 | Priority | CPU Affinity | EcoQoS |
 | --- | --- | --- | --- |

@@ -1,16 +1,25 @@
 """Run the built EXE in isolated read-only mode, then produce a verified portable ZIP."""
 import argparse
 import hashlib
-from importlib.metadata import version as dependency_version
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import tempfile
 import zipfile
 
 from tools.validate_release import ROOT, validate
+from ace_scheduler.build_metadata import validate_build_info
+
+
+def validate_provenance(package, version, expected_commit):
+    """Validate the artifact before launching it or writing any release output."""
+    info = json.loads((package / "_internal/build-info.json").read_text(encoding="utf-8"))
+    build = validate_build_info(info, version, expected_commit=expected_commit, require_clean=True)
+    lock = package / "_internal/requirements-lock.txt"
+    if hashlib.sha256(lock.read_bytes()).hexdigest() != build["requirements_sha256"]:
+        raise ValueError("Packaged requirements differ from embedded build information")
+    return build
 
 
 def main():
@@ -18,12 +27,20 @@ def main():
     parser.add_argument("--package", type=Path, default=ROOT / "dist/ACE-Scheduler")
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     parser.add_argument("--evidence", type=Path, default=ROOT / "artifacts/release-smoke")
+    parser.add_argument("--expected-commit", help="Expected full Git commit; defaults to the current HEAD")
     args = parser.parse_args()
     version = validate()
     package, output, evidence = (path.resolve() for path in (args.package, args.output, args.evidence))
     executable = package / "ACE-Scheduler.exe"
     if not executable.is_file() or not (package / "_internal").is_dir():
         raise FileNotFoundError("Build ACE-Scheduler.exe with PyInstaller first")
+    expected_commit = args.expected_commit
+    if expected_commit is None:
+        expected_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                         capture_output=True, text=True, check=True).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_commit):
+        raise ValueError("Expected release commit must be a full 40-character Git SHA")
+    build = validate_provenance(package, version, expected_commit)
     output.mkdir(parents=True, exist_ok=True)
     evidence.mkdir(parents=True, exist_ok=True)
     # A fresh output directory prevents an old smoke.json from masking a failed run.
@@ -45,20 +62,20 @@ def main():
         diagnostic_report = json.loads(diagnostics.read("report.json"))
     if diagnostic_report["build"]["version"] != version or version not in report.get("about_version", ""):
         raise RuntimeError("Diagnostic or About version differs from the packaged application")
+    for reported_build in (report.get("build", {}), diagnostic_report.get("build", {})):
+        if (reported_build.get("distribution") != "packaged"
+                or validate_build_info(reported_build, version, expected_commit=expected_commit,
+                                       require_clean=True) != build):
+            raise RuntimeError("Running executable build information differs from the packaged artifact")
     if report.get("pages") != ["overview", "policy", "experiment", "settings", "about"]:
         raise RuntimeError("Incomplete page capture")
     for page in report["pages"]:
         if (smoke / f"{page}.png").stat().st_size < 1000:
             raise RuntimeError(f"Empty page screenshot: {page}")
-    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
-    manifest = {"name": "ACE Scheduler", "version": version,
-                "commit": commit.stdout.strip() if commit.returncode == 0 else None,
+    manifest = {"name": "ACE Scheduler", **build,
                 "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
-                "dependencies": {name: dependency_version(name) for name in
-                                 ("PySide6-Essentials", "shiboken6", "psutil", "PyInstaller", "Pillow")},
                 "startup_verified": True}
     (package / "_internal/build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    shutil.copy2(ROOT / "requirements-lock.txt", package / "_internal/requirements-lock.txt")
     archive = output / f"ACE-Scheduler-v{version}-x64.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as stream:
         for file in sorted(package.rglob("*")):

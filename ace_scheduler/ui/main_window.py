@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import copy
-import csv
-from datetime import datetime, timezone
+from dataclasses import asdict
 import time
 
 from PySide6.QtCore import QByteArray, QThread, Qt, Signal, Slot, QSize
@@ -10,9 +9,9 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialo
                                QMessageBox,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
-from ace_scheduler.config.models import PRIORITIES
+from ace_scheduler.config.models import ECO_MODES, PRIORITIES
 from ace_scheduler.branding import APP_NAME, app_icon
-from ace_scheduler.core.experiment import History, summary
+from ace_scheduler.core.experiment import ACTIVE, STATE_LABELS, History, summary, save_session, export_csv
 from ace_scheduler.core.process_monitor import MonitorWorker
 from .process_table import number
 from .components import Backdrop, icon, label
@@ -54,6 +53,8 @@ class MainWindow(FramelessMainWindow):
         self.restore_count = 0
         self.armed = set()
         self.selected_identity = None
+        self.selected_experiment = None
+        self.experiment_identity = None
         self.thread = None
         self.pending_close = False
         self.pending_restore = False
@@ -91,7 +92,7 @@ class MainWindow(FramelessMainWindow):
         self.worker.ready.connect(self.on_ready)
         self.worker.snapshot.connect(self.on_snapshot)
         self.worker.log_line.connect(self.log.appendPlainText)
-        self.worker.applied.connect(self.on_applied)
+        self.worker.recorded.connect(self.on_record)
         self.worker.restore_done.connect(self.on_restore_done)
         self.worker.command_done.connect(self.on_command_done)
         self.config_changed.connect(self.worker.configure)
@@ -215,7 +216,7 @@ class MainWindow(FramelessMainWindow):
         self.nav_buttons[index].setChecked(True)
         self.page_title.setText(titles[index][0])
         self.page_description.setText(titles[index][1])
-        self.process_picker.setVisible(index in (0, 2))
+        self.process_picker.setVisible(index == 0)
         self.policy_page.footer.setVisible(index == 1)
 
     def select_table_process(self):
@@ -401,7 +402,7 @@ class MainWindow(FramelessMainWindow):
         identities = {row.identity for row in rows if row.identity}
         for row in rows:
             if row.identity and row.metrics:
-                self.history.add(row.identity, row.metrics)
+                self.history.add(row.identity, row.metrics, asdict(row.state))
         # Bound history for exited processes: keep only the most recent 16 instances.
         all_ids = list(self.history.samples)
         keep = identities | set(all_ids[-16:])
@@ -442,8 +443,18 @@ class MainWindow(FramelessMainWindow):
 
     @Slot(object, float, str)
     def on_applied(self, identity, timestamp, status):
-        self.history.mark(identity, timestamp, status)
+        session = self.history.mark(identity, timestamp, status)
+        if session:
+            self.selected_experiment = session.id
         self.refresh_history()
+
+    @Slot(object)
+    def on_record(self, event):
+        session = self.history.consume(event)
+        if session and self.selected_experiment is None:
+            self.selected_experiment = session.id
+        if not self.background_hidden and event["kind"] not in ("sample", "tick"):
+            self.refresh_experiment()
 
     def refresh_history(self):
         identity = self.selected_identity
@@ -464,55 +475,174 @@ class MainWindow(FramelessMainWindow):
         for field in ("total_read_gb", "total_write_gb"):
             value = getattr(metrics, field, None)
             values[field].setText(number(value) + " GB" if value is not None else "—")
-        self.export_button.setEnabled(identity is not None)
         samples = list(self.history.samples.get(identity, []))
         experiment = self.history.experiments.get(identity)
-        for chart in (self.chart, self.experiment_page.chart):
-            chart.set_data(samples, experiment.marker if experiment else None)
-        self.history_title.setText(f"{identity.name} · {identity.pid}" if identity else "等待选择进程")
+        self.chart.set_data(samples, experiment.marker if experiment else None)
+        self.refresh_experiment()
+
+    def current_experiment(self):
+        return self.history.sessions.get(self.selected_experiment)
+
+    def select_experiment(self, index):
+        value = self.experiment_page.picker.itemData(index)
+        self.selected_experiment = value[1] if value and value[0] == "session" else None
+        self.experiment_identity = value[1] if value and value[0] == "instance" else None
+        self.refresh_experiment()
+
+    def refresh_experiment(self, *_):
+        if not hasattr(self, "experiment_page"):
+            return
+        page = self.experiment_page
+        live = {r.identity for r in (self.latest_snapshot[0] if self.latest_snapshot else []) if r.identity}
+        mode = page.filter.currentData()
+        entries = []
+        if mode != "sessions":
+            for identity in self.history.samples:
+                running = identity in live
+                if (mode == "running" and not running) or (mode == "ended" and running):
+                    continue
+                entries.append((f"{'运行中' if running else '已结束'} · {identity.name} · {identity.pid}", ("instance", identity)))
+        for session in reversed(list(self.history.sessions.values())):
+            running = session.identity in live and not session.imported
+            if (mode == "running" and not running) or (mode == "ended" and running):
+                continue
+            entries.append((f"{session.id[:8]} · {session.identity.name} · {STATE_LABELS[session.state]}"
+                            + (" · 已打开快照" if session.imported else ""), ("session", session.id)))
+        selected = ("session", self.selected_experiment) if self.selected_experiment else ("instance", self.experiment_identity or self.selected_identity)
+        values = [value for _, value in entries]
+        if selected not in values:
+            selected = values[0] if values else None
+        page.picker.blockSignals(True)
+        page.picker.clear()
+        for title, value in entries:
+            page.picker.addItem(title, value)
+        if selected:
+            page.picker.setCurrentIndex(values.index(selected))
+        page.picker.blockSignals(False)
+        self.selected_experiment = selected[1] if selected and selected[0] == "session" else None
+        self.experiment_identity = selected[1] if selected and selected[0] == "instance" else None
+        session = self.current_experiment()
+        identity = session.identity if session else self.experiment_identity
+        page.begin_button.setEnabled(identity in live and not self.worker_failure)
+        page.finish_button.setEnabled(bool(session and not session.imported and session.state in ACTIVE))
+        page.remove_button.setEnabled(bool(session and (session.imported or session.state not in ACTIVE)))
+        page.save_button.setEnabled(session is not None)
+        self.export_button.setEnabled(session is not None)
+        self.history_title.setText(f"{identity.name} · PID {identity.pid}" if identity else "选择实例或打开已保存实验")
         for value in self.experiment_page.values.values():
             value.setText("—")
-        if identity is None:
-            self.comparison.setText("发现进程后，可在右上角选择要比较的进程。")
+        if not session:
+            samples = list(self.history.samples.get(identity, []))
+            page.chart.set_data(samples)
+            page.events.setPlainText("")
+            self.comparison.setText(self.history.warning or "选择运行中实例开始基线记录，或应用策略自动新建会话。已结束实例的会话可以继续查看与导出。")
             return
-        if not experiment:
+        page.chart.set_data(session.samples, session.marker, (session.started, session.after_end or session.baseline_end))
+        for phase, window in session.windows().items():
+            if phase == "transition":
+                continue
             for field in ("cpu_percent", "read_mbps", "write_mbps"):
-                self.experiment_page.values[(field, "before")].setText(summary(samples, field))
-            self.comparison.setText("正在记录应用前的数据。应用策略时，会保留此前最多 60 秒作为对照。")
-            return
-        after = [sample for sample in samples if sample.timestamp > experiment.marker]
-        for field in ("cpu_percent", "read_mbps", "write_mbps"):
-            self.experiment_page.values[(field, "before")].setText(summary(experiment.before, field))
-            self.experiment_page.values[(field, "after")].setText(summary(after, field))
-        self.comparison.setText("最近操作：" + experiment.label + " · 应用前后各取最多 60 秒，有效样本按时长加权。")
+                page.values[(field, phase)].setText(summary(session.samples, field, *window))
+        text = f"{session.id[:8]} · {STATE_LABELS[session.state]} · 基线设置{'已核验' if session.baseline_verified else '未核验'}"
+        if session.issues:
+            text += "\n" + "；".join(session.issues)
+        restores = [event for event in session.events if event["kind"] == "restore"]
+        if restores:
+            text += "\n最近恢复：" + restores[-1].get("result", {}).get("status", "未知")
+        if self.history.warning:
+            text += "\n" + self.history.warning
+        self.comparison.setText(text + "\n峰值为采样区间平均速率的最大值；缺失不按零计算。")
+        def setting(name, value):
+            if value is None:
+                return "未知"
+            if name == "priority":
+                return {v: k for k, v in PRIORITIES.items()}.get(value, str(value)) if isinstance(value, (int, str)) else "未知"
+            if name == "affinity":
+                return "CPU " + ", ".join(map(str, value)) if isinstance(value, (list, tuple)) else "未知"
+            if isinstance(value, bool):
+                return "开启" if value else "显式关闭"
+            if name == "eco" and isinstance(value, dict):
+                return "系统管理" if not value.get("control", 0) & 1 else "开启" if value.get("state", 0) & 1 else "显式关闭"
+            return str(value)
+        policy = session.context.get("requested_policy") or {}
+        affinity_policy = policy.get("affinity", {})
+        mode = affinity_policy.get("mode")
+        affinity_text = {"unchanged": "不修改", "all": "全部", "last_n": f"最后 {affinity_policy.get('count', '?')} 个",
+                         "percentage": f"{affinity_policy.get('percentage', '?')}%", "custom": "自选 CPU"}.get(mode, "未知")
+        details = f"请求策略：Priority {'不修改' if policy.get('priority') == 'unchanged' else policy.get('priority', '未知')} · Affinity {affinity_text} · EcoQoS {ECO_MODES.get(policy.get('eco'), '未知')}"
+        details += "\n基线实际值：" + " · ".join(f"{name} {setting(name, session.baseline_state.get(name))}" for name in ("priority", "affinity", "eco"))
+        details += "\n目标文件版本：" + (session.context.get("target", {}).get("version") or "未能读取")
+        names = {"apply": "应用", "next_apply": "再次应用", "restore": "恢复", "maintenance": "维护",
+                 "observed_change": "设置变化", "process_ended": "实例结束", "sampling_reset": "采样重置",
+                 "worker_failed": "后台失败", "rule_stopped": "规则停止", "manual_stop": "手动结束",
+                 "sampling_changed": "采样配置变更", "counter_reset": "计数器回退", "recording_stopped": "停止记录",
+                 "recovery_abandoned": "放弃恢复记录", "new_session": "新建会话"}
+        for event in session.events:
+            result = event.get("result", {})
+            details += f"\n{event['timestamp'] - session.started:.2f}s · {names.get(event['kind'], event['kind'])} · " + result.get("status", event.get("reason", ""))
+            for op in result.get("operations", []):
+                details += f"\n  {op['field']}：{op.get('message', '')}"
+                if not op.get("untouched") and not op.get("skipped"):
+                    details += f" · 操作前 {setting(op['field'], op.get('original'))} → 回读 {setting(op['field'], op.get('actual'))}"
+        page.events.setPlainText(details)
 
-    def export_csv(self):
-        identity = self.selected_identity
-        if not identity:
+    def begin_experiment(self):
+        session = self.current_experiment()
+        identity = session.identity if session else self.experiment_identity
+        if identity is None:
             return
-        path, _ = QFileDialog.getSaveFileName(self, "导出进程 I/O 实验", f"{identity.name}-{identity.pid}.csv", "CSV (*.csv)")
+        page = self.experiment_page
+        session = self.history.begin(identity, time.monotonic(), baseline_seconds=page.baseline.value(),
+                                     transition_seconds=page.transition.value(), after_seconds=page.after.value())
+        if session:
+            self.selected_experiment = session.id
+            page.filter.setCurrentIndex(0)
+        self.refresh_experiment()
+
+    def finish_experiment(self):
+        session = self.current_experiment()
+        if session and not session.imported:
+            session.event({"kind": "manual_stop", "timestamp": time.monotonic(), "reason": "手动结束记录"})
+            session.finish(time.monotonic(), "手动结束记录")
+            self.refresh_experiment()
+
+    def remove_experiment(self):
+        session = self.current_experiment()
+        if session and QMessageBox.question(self, "移除实验", "移除本次运行中的记录？请先保存 JSON；已保存的文件不会删除。") == QMessageBox.StandardButton.Yes:
+            self.history.remove(session.id)
+            self.selected_experiment = None
+            self.refresh_experiment()
+
+    def open_experiment(self):
+        path, _ = QFileDialog.getOpenFileName(self, "打开实验快照", "", "JSON (*.json)")
         if not path:
             return
-        experiment = self.history.experiments.get(identity)
-        samples = {sample.timestamp: sample for sample in self.history.samples.get(identity, [])}
-        if experiment:
-            samples.update({sample.timestamp: sample for sample in experiment.before})
         try:
-            with open(path, "w", newline="", encoding="utf-8-sig") as stream:
-                writer = csv.writer(stream)
-                writer.writerow(["process", "pid", "process_created_unix", "sample_utc_approx", "phase", "operation_result",
-                                 "sample_seconds", "cpu_percent_machine", "read_MB_s", "write_MB_s", "ram_MB",
-                                 "total_read_GB", "total_write_GB", "read_count", "write_count"])
-                offset = time.time() - time.monotonic()
-                for timestamp, sample in sorted(samples.items()):
-                    phase = "observe" if not experiment else ("before" if timestamp <= experiment.marker else "after")
-                    writer.writerow([identity.name, identity.pid, identity.created,
-                                     datetime.fromtimestamp(timestamp + offset, timezone.utc).isoformat(), phase,
-                                     experiment.label if experiment else "", sample.sample_seconds, sample.cpu_percent,
-                                     sample.read_mbps, sample.write_mbps, sample.ram_mb, sample.total_read_gb,
-                                     sample.total_write_gb, sample.read_count, sample.write_count])
+            session = self.history.load(path)
+            self.selected_experiment = session.id
+            self.experiment_page.filter.setCurrentIndex(0)
+            self.refresh_experiment()
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError) as exc:
+            QMessageBox.warning(self, "打开失败", str(exc))
+
+    def save_experiment(self):
+        self._export_experiment(False)
+
+    def export_csv(self):
+        self._export_experiment(True)
+
+    def _export_experiment(self, csv_format):
+        session = self.current_experiment()
+        if not session:
+            return
+        extension = "csv" if csv_format else "json"
+        path, _ = QFileDialog.getSaveFileName(self, "保存实验", f"{session.identity.name}-{session.id[:8]}.{extension}", f"{extension.upper()} (*.{extension})")
+        if not path:
+            return
+        try:
+            (export_csv if csv_format else save_session)(session, path)
             self.log.appendPlainText(time.strftime("%H:%M:%S ") + "已导出 " + path)
-        except OSError as exc:
+        except (OSError, ValueError, OverflowError) as exc:
             QMessageBox.warning(self, "导出失败", str(exc))
 
     @Slot(bool)

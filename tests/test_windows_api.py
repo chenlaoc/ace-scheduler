@@ -94,6 +94,63 @@ def test_eco_masks_preserve_unrelated_bits_and_restore_auto():
     assert (api.control, api.state) == (4, 4)
 
 
+@pytest.mark.windows
+def test_real_eco_only_all_modes_and_restore_own_child(helper, tmp_path, monkeypatch):
+    from ace_scheduler.config.models import Policy, AffinitySpec
+    from ace_scheduler.core.recovery import RecoveryJournal
+    api = WindowsProcessApi()
+    scheduler = Scheduler(api, CpuTopology.detect(), RecoveryJournal(tmp_path / "recovery.json"))
+    original = scheduler.inspect(helper)
+    def forbidden(*args):
+        pytest.fail("EcoQoS-only policy called an unrelated setter")
+    monkeypatch.setattr(api, "set_priority", forbidden)
+    monkeypatch.setattr(api, "set_affinity", forbidden)
+    try:
+        for mode, label in (("on", "ON"), ("off", "OFF"), ("system", "系统管理")):
+            result = scheduler.apply(helper, Policy("unchanged", AffinitySpec("unchanged"), mode))
+            assert result.ok, result.status
+            state = scheduler.inspect(helper)
+            assert state.eco.label == label
+            assert state.priority == original.priority and state.affinity == original.affinity
+            assert set(scheduler.originals[helper]) == {"eco"}
+    finally:
+        assert scheduler.restore(helper, force=True).ok
+    assert scheduler.inspect(helper) == original
+
+
+@pytest.mark.windows
+def test_experiment_contains_real_child_state_and_file_version(helper):
+    from ace_scheduler.config.models import AppConfig, ProcessRule, Policy, AffinitySpec
+    from ace_scheduler.core.process_monitor import MonitorEngine
+    from ace_scheduler.core.experiment import History
+    history = History()
+    clock = [100.0]
+    process = psutil.Process(helper.pid)
+    process.info = {"pid": helper.pid, "name": helper.name}
+    scheduler = Scheduler(WindowsProcessApi(), CpuTopology.detect())
+    policy = Policy("unchanged", AffinitySpec("unchanged"), "on")
+    engine = MonitorEngine(scheduler, AppConfig([ProcessRule(helper.name, policy=policy)]),
+                           iterator=lambda _: [process], process_factory=lambda _: process,
+                           clock=lambda: clock[0], emit_record=history.consume)
+    original = scheduler.inspect(helper)
+    engine.scan()
+    engine.arm(helper.name.casefold())
+    try:
+        clock[0] += 1
+        engine.scan()
+        session = history.experiments[helper]
+        assert session.context["target"]["executable_path"] == process.exe()
+        assert session.context["target"]["version"]
+        application = session.events[0]
+        assert application["before"]["priority"] == original.priority
+        assert application["after"]["eco"]["state"] & 1
+        assert application["result"]["ok"]
+    finally:
+        assert engine.restore(force=True)
+    assert session.events[-1]["kind"] == "restore"
+    assert scheduler.inspect(helper) == original
+
+
 def test_64_bit_affinity_mask_including_high_bit():
     class Api:
         mask = None

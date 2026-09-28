@@ -5,9 +5,13 @@ import os
 import sys
 import json
 import subprocess
+import hashlib
+from importlib.metadata import version as dependency_version
 from PyInstaller.utils.hooks import copy_metadata
 
 project = Path(SPECPATH)
+sys.path.insert(0, str(project))
+from ace_scheduler.build_metadata import BUILD_DEPENDENCIES
 source_version = {}
 exec((project / 'ace_scheduler/__init__.py').read_text(encoding='utf-8'), source_version)
 commit = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=project, capture_output=True, text=True)
@@ -16,7 +20,10 @@ build_info = Path(workpath) / 'build-info.json'
 build_info.parent.mkdir(parents=True, exist_ok=True)
 build_info.write_text(json.dumps({'version': source_version['__version__'],
     'commit': commit.stdout.strip() if commit.returncode == 0 else 'unknown',
-    'dirty': bool(status.stdout)}), encoding='utf-8')
+    'dirty': bool(status.stdout) if status.returncode == 0 else None,
+    'dependencies': {name: dependency_version(name) for name in BUILD_DEPENDENCIES},
+    'requirements_sha256': hashlib.sha256((project / 'requirements-lock.txt').read_bytes()).hexdigest()
+    }), encoding='utf-8')
 # Resolve dependencies only from Python/Qt and Windows. Unrelated applications on
 # PATH may ship DLLs with the same basename but incompatible exports (e.g. ICU).
 system_root = Path(os.environ.get('SystemRoot', r'C:\Windows'))
@@ -34,6 +41,7 @@ analysis = Analysis(
     binaries=[],
     datas=[(str(project / 'README.md'), '.'), (str(project / 'LICENSE'), '.'),
            (str(build_info), '.'),
+           (str(project / 'requirements-lock.txt'), '.'),
            (str(project / 'THIRD_PARTY_NOTICES.md'), '.'),
            (str(project / 'docs'), 'docs'), (str(project / 'assets' / 'brand'), 'assets/brand'),
            (str(project / 'licenses'), 'licenses'),

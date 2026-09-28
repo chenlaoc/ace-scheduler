@@ -51,6 +51,12 @@ ACE-Scheduler-vX.Y.Z-x64.zip.sha256
 
 ZIP 内为 `ACE-Scheduler/ACE-Scheduler.exe` 和完整 `_internal/`。包内含使用说明、第三方声明、运行依赖元数据、Python 许可证及版本清单；不得只分发 EXE。
 
+构建时会把 Git 提交、工作区是否有未提交改动、构建环境的依赖版本和 `requirements-lock.txt` 的 SHA-256 写入 `build-info.json`，同时嵌入该锁文件。后续打包从这些信息生成 manifest，不读取打包机器的依赖版本，也不替换产物内的锁文件。
+
+`tools.package_release` 默认以当前 `HEAD` 为预期发布提交；可用 `--expected-commit <完整的40位SHA>` 明确指定。产物提交不同、构建工作区不干净、来源信息缺失或锁文件摘要不符时，脚本会拒绝打包。同版本号不能替代提交校验。旧版缺少依赖清单的产物必须重新构建。只读启动后还会检查 EXE 的启动报告和诊断报告与内嵌信息一致。
+
+本地未提交改动可以构建并执行只读启动验收，但不能生成发布包。准备发布时，应在包含这些改动的干净提交上重新构建；不要手工修改 `build-info.json` 来绕过检查。这些检查用于防止意外混用产物，不能替代代码签名。
+
 ```powershell
 Get-FileHash .\ACE-Scheduler-vX.Y.Z-x64.zip -Algorithm SHA256
 ```

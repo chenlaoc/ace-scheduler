@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 
 from ace_scheduler import __version__
+from ace_scheduler.build_metadata import validate_build_info
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,8 +26,7 @@ def build_info():
         path = ROOT / "build-info.json"
         if getattr(sys, "frozen", False) and path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("version") == __version__ and re.fullmatch(r"[0-9a-f]{7,40}", data.get("commit", "")):
-                info.update(commit=data["commit"], dirty=data.get("dirty") is True)
+            info.update(validate_build_info(data, __version__))
         elif not getattr(sys, "frozen", False):
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,

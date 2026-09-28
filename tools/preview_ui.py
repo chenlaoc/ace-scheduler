@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import time
+from dataclasses import asdict
 
 os.environ.setdefault("QT_QPA_PLATFORM", "windows")
 
@@ -11,7 +12,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from ace_scheduler.config.config_manager import ConfigManager
-from ace_scheduler.config.models import AppConfig
+from ace_scheduler.config.models import AppConfig, AffinitySpec
 from ace_scheduler.core.cpu_topology import CpuTopology
 from ace_scheduler.core.process_metrics import Metrics, ProcessIdentity
 from ace_scheduler.core.process_monitor import ProcessRow
@@ -44,9 +45,17 @@ def main():
         metrics = Metrics(t, base + math.sin(second * .4) * .8,
                           base * 5 + math.sin(second * .36) * 4 + math.sin(second * 1.2) * 2,
                           .5 + math.sin(second * .23) * .22, 12.45, .08, 186.5, 16000, 42, 1)
-        window.history.add(identity, metrics)
+        baseline_state = ScheduleState(0x20, topology.available, EcoState(0, 0))
+        applied_state = ScheduleState(0x40, topology.available[-1:], EcoState(1, 1))
+        window.history.add(identity, metrics, asdict(baseline_state if second <= 30 else applied_state))
         if second == 30:
-            window.history.mark(identity, t, "已验证（模拟）")
+            session = window.history.operation({"kind": "apply", "identity": asdict(identity), "timestamp": t, "ended": t,
+                "before": asdict(baseline_state), "after": asdict(applied_state), "context": {"synthetic": True,
+                "topology": asdict(topology), "sampling": {"monitor_interval": 1}},
+                "policy": {"priority": "Idle", "eco": "on", "affinity": {"mode": "last_n", "count": 1}},
+                "result": {"ok": True, "status": "已验证（模拟）", "operations": [{"field": "priority", "ok": True,
+                "changed": True, "message": "Idle 已验证（模拟）"}]}})
+            window.selected_experiment = session.id
     other = ProcessIdentity(6812, 1, "SGuardSvc64.exe")
     row = ProcessRow(identity.name, identity.pid, identity, metrics,
                      ScheduleState(0x40, topology.available[-1:], EcoState(1, 1)), "持续维护 · 已验证")
@@ -56,6 +65,9 @@ def main():
     window.log.appendPlainText("12:00:00 SGuard64.exe PID=4260 detected（模拟）\n12:00:30 Priority → Idle OK（模拟）\n12:00:30 EcoQoS → ON OK（模拟）")
     window.policy_page.set_preset(window.policy_page.selected_keys(), "Strong")
     window.policy_page.set_preset(("ace-tray.exe",), "Mild")
+    for name, eco in (("sguard64.exe", "on"), ("sguardsvc64.exe", "system"),
+                      ("ace-service64.exe", "unchanged"), ("sguardupdate64.exe", "off")):
+        window.policy_page.edit_policy(name, priority="unchanged", affinity=AffinitySpec("unchanged"), eco=eco)
     window.resize(1280, 860)
     window.show()
     for index, name in enumerate(("overview", "policy", "experiment", "settings", "about")):
@@ -63,10 +75,14 @@ def main():
         app.processEvents()
         window.grab().save(str(folder / f"{index + 1:02}-{name}.png"))
     window.resize(1040, 700)
-    for index, name in ((3, "settings"), (4, "about")):
+    for index, name in ((2, "experiment"), (3, "settings"), (4, "about")):
         window.show_page(index)
         app.processEvents()
         window.grab().save(str(folder / f"compact-{name}.png"))
+        if index == 2:
+            window.experiment_page.verticalScrollBar().setValue(window.experiment_page.verticalScrollBar().maximum())
+            app.processEvents()
+            window.grab().save(str(folder / "compact-experiment-details.png"))
     window.show_page(1)
     app.processEvents()
     window.grab().save(str(folder / "05-compact-policy.png"))

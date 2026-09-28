@@ -55,6 +55,21 @@ def test_empty_affinity_blocks_every_write(scheduler):
 def test_groups_skip_affinity_without_guessing():
     scheduler = Scheduler(FakeApi(), CpuTopology(None, 128, (), 2))
     result = scheduler.apply(ProcessIdentity(1, 1, "test.exe"), preset("Strong"))
-    assert result.ok
+    assert not result.ok
+    assert result.status.startswith("部分成功") and "affinity" in result.status
+    assert "已验证" not in result.status
+    assert next(op for op in result.operations if op.field == "affinity").skipped
     assert all(field != "affinity" for _, field, _ in scheduler.api.writes)
     assert any("跳过" in op.message for op in result.operations)
+
+
+def test_all_failures_and_no_change_are_distinct(scheduler):
+    key = ProcessIdentity(5, 1, "test.exe")
+    scheduler.api.fail.add("open")
+    result = scheduler.apply(key, preset("Strong"))
+    assert not result.ok and result.status.startswith("失败")
+    scheduler.api.fail.clear()
+    assert scheduler.apply(key, preset("Strong")).ok
+    result = scheduler.apply(key, preset("Strong"))
+    assert result.ok and result.status == "无需修改（已验证）"
+    assert all(op.verified and op.write_succeeded is None for op in result.operations)
