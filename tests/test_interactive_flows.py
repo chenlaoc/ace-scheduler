@@ -77,6 +77,42 @@ def warning_close(dialog):
     click(dialog.button(QMessageBox.StandardButton.Ok))
 
 
+@pytest.mark.parametrize("size", [(1280, 860), (1040, 700)])
+def test_overview_metrics_toggle_preserves_monitoring(window, size):
+    from ace_scheduler.errors import ExceptionReporter
+
+    window.resize(*size)
+    identity = ProcessIdentity(123, 100, "test.exe")
+    armed = {identity.name}
+    window.on_snapshot([ProcessRow(identity.name, identity.pid, identity, Metrics(10, 1, 2, 3))], armed, 1)
+    window.table.selectRow(0)
+    initial_badge = window.session_badge.text()
+    toggle = button(window.overview_page, "显示全部指标")
+    halted = []
+    window.halt_requested.connect(halted.append)
+    reporter = ExceptionReporter(window)
+    try:
+        for sample, expanded in enumerate((True, False, True, False), start=11):
+            click(toggle)
+            assert not reporter.reported and not window.worker_failure and not halted
+            assert toggle.text() == ("收起扩展指标" if expanded else "显示全部指标")
+            assert toggle.isChecked() is expanded
+            for column in (3, 6, 7, 8, 9, 10):
+                assert window.table.isColumnHidden(column) is not expanded
+            if expanded:
+                assert window.table.columnWidth(0) >= 165
+                assert window.table.columnWidth(11) >= 230
+            window.on_snapshot([ProcessRow(identity.name, identity.pid, identity,
+                                           Metrics(sample, sample, 2, 3))], armed, 1)
+            assert window.table.item(0, 2).text() == f"{sample:.2f}"
+            assert window.table.selected_identity() == identity
+            assert window.selected_identity == identity
+            assert window.armed == armed and window.restore_count == 1
+            assert window.session_badge.text() == initial_badge
+    finally:
+        reporter.close()
+
+
 def test_row_keyboard_edit_and_partial_save_survive_navigation(window):
     click(window.nav_buttons[1])
     page = window.policy_page

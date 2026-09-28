@@ -33,8 +33,11 @@ class ProcessTable(QTableWidget):
     def set_detailed(self, enabled):
         for column in (3, 6, 7, 8, 9, 10):
             self.setColumnHidden(column, not enabled)
-        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeMode.Stretch)
+        mode = QHeaderView.ResizeMode.Interactive if enabled else QHeaderView.ResizeMode.Stretch
+        for column, width in ((0, 165), (11, 230)):
+            self.horizontalHeader().setSectionResizeMode(column, mode)
+            if enabled:
+                self.setColumnWidth(column, width)
 
     def update_rows(self, rows):
         selected = self.selected_identity()

@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml"><img src="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml/badge.svg" alt="Windows CI"></a>
-  <br>Windows x64 · Python 3.11+ · PySide6 · v1.5.0
+  <br>Windows x64 · Python 3.11+ · PySide6 · v1.5.1（开发版）
 </p>
 
 <p align="center">
