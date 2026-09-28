@@ -11,3 +11,11 @@
 退出弹窗防重入，排队操作与恢复继续等待后台回执；退出记录保存失败时窗口保留。原始恢复数据不会出现在 Git 或诊断导出中。
 
 验证：117 项 Windows 本地回归通过（包含真实自建协作进程的跨会话恢复）；只读 smoke 和页面预览通过。证据在 `artifacts/recovery-smoke`、`artifacts/recovery-preview`。不承诺崩溃瞬间自动恢复，也不承诺抵御存储硬件未兑现刷盘的故障。
+
+## B. 托盘与再次启动（Issue #2）
+
+关闭偏好默认退出，可改为隐藏到托盘。托盘提供打开、停止全部规则（保留现值）、恢复原设置和真正退出。隐藏时继续采样/维护并积累有界历史，暂停图表和表格绘制；再次打开立即刷新。托盘不可用时显示窗口；长时间暂停后清除采样差分基线并重新检查维护。
+
+单实例仍由 QLockFile 控制；随机名称的 QLocalServer 使用 UserAccessOption，只允许同一用户，并校验随机令牌和唯一固定的 activate 消息。第二实例收到确认后退出，不创建工作线程。通信有大小、连接数和时间上限。参见 [Qt 本机通信权限](https://doc.qt.io/qtforpython-6/PySide6/QtNetwork/QLocalServer.html)、[Qt 托盘重建行为](https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QSystemTrayIcon.html)。
+
+测试使用真正的第二个进程验证激活和令牌拒绝；不以同进程线程阻塞等待模拟跨进程通信。Explorer 重启由 Qt 托盘机制及可用性检查处理，本次没有重启用户的 Explorer 或改变系统睡眠状态。

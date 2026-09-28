@@ -29,6 +29,7 @@ def main() -> int:
     from ace_scheduler.ui.main_window import MainWindow
     from ace_scheduler.windows.elevation import is_admin, request_elevation
     from ace_scheduler.branding import APP_NAME, DATA_NAMESPACE, app_icon
+    from ace_scheduler.instance import InstanceServer, activate_existing
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
@@ -51,6 +52,8 @@ def main() -> int:
         lock = QLockFile(str(data / "instance.lock"))
         lock.setStaleLockTime(0)
         if not lock.tryLock(0):
+            if activate_existing(data):
+                return 0
             QMessageBox.information(None, APP_NAME, "已有实例正在运行，或配置目录被锁定。")
             return 1
         handler = RotatingFileHandler(data / "scheduler.log", maxBytes=512_000, backupCount=2, encoding="utf-8")
@@ -62,7 +65,13 @@ def main() -> int:
     except OSError as exc:
         QMessageBox.critical(None, "无法初始化配置目录", str(exc))
         return 1
-    window = MainWindow(config, manager, read_only)
+    window = MainWindow(config, manager, read_only, enable_tray=not bool(args.smoke_test))
+    instance = None
+    try:
+        instance = InstanceServer(data, app)
+        instance.activated.connect(window.activate_window)
+    except OSError as exc:
+        window.log.appendPlainText("已有实例唤醒服务不可用：" + str(exc))
     window.show()
     if warning or config_warning:
         window.log.appendPlainText("\n".join(filter(None, (warning, config_warning))))
@@ -91,6 +100,8 @@ def main() -> int:
             window.close()
         QTimer.singleShot(3000, capture)
     code = app.exec()
+    if instance:
+        instance.close()
     handler.close()
     lock.unlock()
     return code

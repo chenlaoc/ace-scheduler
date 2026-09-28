@@ -20,6 +20,12 @@ class SettingsPage(Page):
             combo.setMinimumWidth(110)
         timing.body.addWidget(setting_row("数据采样", "更新进程列表和资源指标的间隔", owner.monitor_interval))
         timing.body.addWidget(setting_row("策略维护", "启用持续维护时，检查调度设置的间隔", owner.enforce_interval))
+        self.close_behavior = QComboBox()
+        self.close_behavior.addItem("退出应用", False)
+        self.close_behavior.addItem("隐藏到托盘", True)
+        self.close_behavior.setCurrentIndex(int(owner.config.close_to_tray))
+        self.close_behavior.activated.connect(owner.close_preference_changed)
+        timing.body.addWidget(setting_row("关闭按钮", "隐藏后采样和已启用的维护继续；从托盘菜单可真正退出", self.close_behavior))
         self.body.addWidget(timing)
 
         session = GlassCard("会话管理")

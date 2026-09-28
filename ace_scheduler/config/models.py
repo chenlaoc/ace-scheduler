@@ -110,6 +110,7 @@ class AppConfig:
     monitor_interval: int = 1
     enforce_interval: int = 3
     geometry: str = ""
+    close_to_tray: bool = False
 
     @classmethod
     def parse(cls, data: dict) -> AppConfig:
@@ -128,7 +129,7 @@ class AppConfig:
         geometry = data.get("geometry", "")
         if not isinstance(geometry, str) or len(geometry) > 8192:
             geometry = ""
-        return cls(rules, monitor, enforce, geometry)
+        return cls(rules, monitor, enforce, geometry, boolean(data.get("close_to_tray", False), "close_to_tray"))
 
     def to_dict(self) -> dict:
         return {"version": 1, **asdict(self)}

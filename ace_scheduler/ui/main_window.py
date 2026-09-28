@@ -34,7 +34,7 @@ class MainWindow(FramelessMainWindow):
     force_restore_requested = Signal()
     abandon_requested = Signal()
 
-    def __init__(self, config, manager, read_only=False, start_worker=True):
+    def __init__(self, config, manager, read_only=False, start_worker=True, enable_tray=False):
         super().__init__()
         self.config = config
         self.manager = manager
@@ -52,11 +52,18 @@ class MainWindow(FramelessMainWindow):
         self.shutting_down = False
         self.allow_close = False
         self.close_dialog_active = False
+        self.background_hidden = False
+        self.explicit_exit = False
+        self.latest_snapshot = None
+        self.tray = None
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
         self.resize(1280, 860)
         self.setMinimumSize(1040, 680)
         self._build()
+        if enable_tray:
+            from .tray import TrayController
+            self.tray = TrayController(self)
         if config.geometry:
             self.restoreGeometry(QByteArray.fromBase64(config.geometry.encode("ascii", errors="ignore")))
         if start_worker:
@@ -237,6 +244,32 @@ class MainWindow(FramelessMainWindow):
             self.monitor_interval.setCurrentIndex(self.monitor_interval.findData(self.config.monitor_interval))
             self.enforce_interval.setCurrentIndex(self.enforce_interval.findData(self.config.enforce_interval))
 
+    def close_preference_changed(self, *_):
+        candidate = copy.deepcopy(self.config)
+        candidate.close_to_tray = self.settings_page.close_behavior.currentData()
+        self.persist(candidate)
+        self.settings_page.close_behavior.setCurrentIndex(int(self.config.close_to_tray))
+
+    def activate_window(self):
+        self.background_hidden = False
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        if self.latest_snapshot:
+            self._render_snapshot(*self.latest_snapshot)
+
+    def request_exit(self):
+        self.explicit_exit = True
+        self.activate_window()
+        self.close()
+
+    def stop_all_rules(self):
+        if self.armed:
+            self.policy_page.run_command("stop", tuple(self.armed))
+
     def request_restore_all(self):
         if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
             return
@@ -285,6 +318,14 @@ class MainWindow(FramelessMainWindow):
         all_ids = list(self.history.samples)
         keep = identities | set(all_ids[-16:])
         self.history.retain(keep)
+        self.latest_snapshot = (rows, armed, originals)
+        if self.tray:
+            self.tray.update(any("失败" in row.status or "冲突" in row.status for row in rows))
+        if self.background_hidden:
+            return
+        self._render_snapshot(rows, armed, originals)
+
+    def _render_snapshot(self, rows, armed, originals):
         self.table.update_rows(rows)
         valid = [row.identity for row in rows if row.identity]
         if self.selected_identity not in valid:
@@ -408,7 +449,16 @@ class MainWindow(FramelessMainWindow):
             self.close()
 
     def closeEvent(self, event):
+        if not self.allow_close and not self.explicit_exit and self.config.close_to_tray:
+            if self.tray and self.tray.available():
+                event.ignore()
+                self.background_hidden = True
+                self.hide()
+                return
+            self.banner.setText("系统托盘不可用，本次关闭将按正常退出流程处理。")
         if self.allow_close or self.thread is None:
+            if self.tray:
+                self.tray.close()
             event.accept()
             return
         event.ignore()
@@ -437,6 +487,7 @@ class MainWindow(FramelessMainWindow):
                 self.restore_requested.emit(None)
                 return
             if box.clickedButton() != keep:
+                self.explicit_exit = False
                 return
         self._shutdown()
 

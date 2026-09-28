@@ -226,6 +226,7 @@ class MonitorWorker(QObject):
         self.enforce_timer = None
         self.recovery_path = recovery_path
         self.read_only = read_only
+        self.last_scan = time.monotonic()
 
     def _log(self, message):
         logging.getLogger("ace_scheduler").info(message)
@@ -267,6 +268,12 @@ class MonitorWorker(QObject):
         if not self.engine:
             return
         try:
+            now = time.monotonic()
+            if now - self.last_scan > max(15, self.config.monitor_interval * 3):
+                self.engine.sampler.previous.clear()
+                self.engine.next_enforce.clear()
+                self._log("长时间暂停后重新采样；指标基线已重置")
+            self.last_scan = now
             self.engine.scan()
             self._publish()
         except Exception as exc:
