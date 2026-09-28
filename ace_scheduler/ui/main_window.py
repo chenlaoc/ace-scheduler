@@ -172,7 +172,7 @@ class MainWindow(FramelessMainWindow):
         text = QVBoxLayout()
         text.setSpacing(5)
         self.page_title = label("运行概览", "pageTitle")
-        self.page_description = label("掌握进程的实时资源变化。", "muted")
+        self.page_description = label("查看进程的资源占用和当前调度设置。", "muted")
         text.addWidget(self.page_title)
         text.addWidget(self.page_description)
         header.addLayout(text, 1)
@@ -185,7 +185,7 @@ class MainWindow(FramelessMainWindow):
         header.addWidget(self.process_picker)
         self.title_bar.finish()
         content.addWidget(self.title_bar)
-        self.banner = label("只读模式 · 调度操作已禁用" if self.read_only else "观察模式 · 点击应用后，策略才会生效", "muted", True)
+        self.banner = label("只读模式 · 调度操作已禁用" if self.read_only else "正在观察，点击应用后才会调整设置。", "muted", True)
         self.banner.setObjectName("banner")
         content.addWidget(self.banner)
         self.pages = QStackedWidget()
@@ -204,10 +204,10 @@ class MainWindow(FramelessMainWindow):
         self.show_page(0)
 
     def show_page(self, index):
-        titles = (("运行概览", "掌握进程的实时资源变化。"),
-                  ("调度策略", "直接逐行调整，或勾选多个进程统一配置。"),
-                  ("实验对照", "观察调度前后，CPU 与 I/O 如何变化。"),
-                  ("设置与日志", "调整监控节奏，查看每一次操作。"),
+        titles = (("运行概览", "查看进程的资源占用和当前调度设置。"),
+                  ("调度策略", "单独修改每行参数，也可以勾选多行一起设置。"),
+                  ("实验对照", "比较应用策略前后的 CPU 占用和进程 I/O。"),
+                  ("设置与日志", "设置采样间隔、处理恢复记录，或查看操作日志。"),
                   ("关于", "版本信息、本地数据与第三方许可。"))
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
@@ -299,7 +299,7 @@ class MainWindow(FramelessMainWindow):
         if self.elevation_request:
             self.elevation_request()
         else:
-            self.banner.setText("调度写入需要管理员权限；请以管理员身份重新打开。")
+            self.banner.setText("修改调度设置需要管理员权限，请以管理员身份重新打开。")
         return False
 
     @Slot(str)
@@ -309,7 +309,7 @@ class MainWindow(FramelessMainWindow):
         self.pending_commands = 0
         self.pending_restore = self.pending_close = self.close_after_command = False
         self.activate_window()
-        self.banner.setText(message + "。恢复记录保留，可在设置中重新启动后台后重试。")
+        self.banner.setText(message + "。恢复记录已保留，请到“设置与日志”重启后台后再试。")
         self.session_badge.setText("●  后台已停止")
         self.policy_page.refresh_status()
         if self.tray:
@@ -319,14 +319,14 @@ class MainWindow(FramelessMainWindow):
         if not self.worker_failure or self.restarting or self.handoff_waiting or self.shutting_down:
             return
         self.restarting = True
-        self.banner.setText("正在重新启动后台；策略将保持未启用。")
+        self.banner.setText("正在重启后台，暂不应用策略…")
         if self.thread and self.thread.isRunning():
             self.suspend_requested.emit()
         else:
             self._thread_finished()
 
     def export_diagnostics(self):
-        if QMessageBox.question(self, "导出诊断", "将导出版本/构建、Windows 版本、CPU 拓扑数量、无进程名称的配置摘要和脱敏事件日志。\n不含原始配置、恢复记录、个人路径、PID 或令牌，也不会上传。") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "导出诊断", "诊断 ZIP 会包含程序版本和构建号、Windows 版本、CPU 拓扑数量、去掉进程名称的配置摘要，以及脱敏后的事件日志。\n\n不会包含原始配置、恢复记录、个人路径、PID 或令牌。文件只保存到你选择的位置，不会上传。") != QMessageBox.StandardButton.Yes:
             return
         path, _ = QFileDialog.getSaveFileName(self, "保存诊断 ZIP", "ACE-Scheduler-diagnostics.zip", "ZIP (*.zip)")
         if not path:
@@ -335,7 +335,7 @@ class MainWindow(FramelessMainWindow):
         try:
             export_diagnostics(path, self.config, self.topology, self.log.toPlainText(), self.manager.path.parent,
                                read_only=self.read_only, worker_failed=self.worker_failure)
-            self.banner.setText("诊断 ZIP 已保存到所选位置，未上传。")
+            self.banner.setText("诊断 ZIP 已保存，没有上传。")
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "诊断导出失败", str(exc))
 
@@ -368,8 +368,8 @@ class MainWindow(FramelessMainWindow):
             return
         if force and not self.ensure_write_access():
             return
-        message = ("将对仍属于原实例的记录恢复原值，包括被外部修改或写入未确认的字段。确认覆盖？" if force else
-                   "将停止全部规则、保留当前调度值，并归档所有恢复记录（包括损坏记录）。之后不能再用这些记录恢复。")
+        message = ("将为记录中的原进程恢复修改前的设置。这会覆盖其他程序改过的值，也会恢复上次写入未确认的项目。\n\n确定覆盖并恢复？" if force else
+                   "将停止全部规则，保留进程当前的设置。所有恢复记录（包括损坏的记录）都会归档，之后无法再用它们恢复。\n\n确定放弃这些记录？")
         if QMessageBox.question(self, "处理恢复记录", message) != QMessageBox.StandardButton.Yes:
             return
         self.pending_commands += 1
@@ -434,7 +434,7 @@ class MainWindow(FramelessMainWindow):
         identity = self.selected_identity
         row = next((row for row in self.table.rows if row.identity == identity), None) if identity else None
         metrics = row.metrics if row else None
-        notes = {"cpu_percent": "整机归一化", "read_mbps": "进程级读取", "write_mbps": "进程级写入", "ram_mb": "当前工作集"}
+        notes = {"cpu_percent": "占整机 CPU 的比例", "read_mbps": "进程级读取", "write_mbps": "进程级写入", "ram_mb": "当前工作集"}
         for field, card in self.overview_page.metrics.items():
             card.set_value(number(getattr(metrics, field, None), 1 if field == "ram_mb" else 2),
                            notes[field] if identity else "等待进程数据")
@@ -458,12 +458,12 @@ class MainWindow(FramelessMainWindow):
         for value in self.experiment_page.values.values():
             value.setText("—")
         if identity is None:
-            self.comparison.setText("发现进程后，在右上角选择观察对象。")
+            self.comparison.setText("发现进程后，可在右上角选择要比较的进程。")
             return
         if not experiment:
             for field in ("cpu_percent", "read_mbps", "write_mbps"):
                 self.experiment_page.values[(field, "before")].setText(summary(samples, field))
-            self.comparison.setText("正在积累基线。应用策略后，将冻结操作前最多 60 秒的数据。")
+            self.comparison.setText("正在记录应用前的数据。应用策略时，会保留此前最多 60 秒作为对照。")
             return
         after = [sample for sample in samples if sample.timestamp > experiment.marker]
         for field in ("cpu_percent", "read_mbps", "write_mbps"):
@@ -504,7 +504,7 @@ class MainWindow(FramelessMainWindow):
     def on_restore_done(self, ok):
         if self.pending_restore:
             self.pending_restore = False
-            self.banner.setText("已恢复全部原设置。" if ok else "恢复未全部成功，请查看日志后重试。")
+            self.banner.setText("已恢复全部原设置。" if ok else "有些设置未能恢复，请查看日志后重试。")
             self.on_command_done()
             return
         if self.pending_close:
@@ -513,7 +513,7 @@ class MainWindow(FramelessMainWindow):
             if ok:
                 self._shutdown()
             else:
-                QMessageBox.warning(self, "恢复未全部成功", "部分进程拒绝恢复。请查看日志；可以重试或选择保留设置退出。")
+                QMessageBox.warning(self, "恢复未全部成功", "有些设置未能恢复。请查看日志后重试，也可以保留当前设置并退出。")
 
     @Slot()
     def on_command_done(self):
@@ -533,7 +533,7 @@ class MainWindow(FramelessMainWindow):
                 self.background_hidden = True
                 self.hide()
                 return
-            self.banner.setText("系统托盘不可用，本次关闭将按正常退出流程处理。")
+            self.banner.setText("系统托盘暂不可用，关闭窗口将进入退出流程。")
         if self.allow_close or self.thread is None:
             if self.tray:
                 self.tray.close()
@@ -544,12 +544,12 @@ class MainWindow(FramelessMainWindow):
             return
         if self.pending_commands:
             self.close_after_command = True
-            self.banner.setText("等待正在执行的应用操作完成后退出…")
+            self.banner.setText("操作还在进行，完成后会继续退出…")
             return
         if not self.read_only and (self.restore_count or self.armed):
             box = QMessageBox(self)
             box.setWindowTitle("退出 " + APP_NAME)
-            box.setText("本会话修改过的进程仍在运行。请选择退出时如何处理调度设置。")
+            box.setText("仍有恢复记录或已启用的规则。退出前，要恢复原设置还是保留当前设置？")
             restore = box.addButton("恢复原设置并退出", QMessageBox.ButtonRole.AcceptRole)
             keep = box.addButton("保留当前设置并退出", QMessageBox.ButtonRole.DestructiveRole)
             box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
@@ -591,7 +591,7 @@ class MainWindow(FramelessMainWindow):
         if self.restarting:
             self.restarting = False
             self.start_monitor()
-            self.banner.setText("后台已重新启动；当前只观察，策略需再次明确应用。")
+            self.banner.setText("后台已重启，当前只观察。需要继续调整时，请再次点击应用。")
             return
         if self.handoff_waiting:
             self.worker_stopped.emit()

@@ -13,12 +13,12 @@ class AboutPage(Page):
         super().__init__()
         info = build_info()
         product = GlassCard("关于 " + APP_NAME)
-        self.version = label(f"版本 {info['version']} · {'便携构建' if info['distribution'] == 'packaged' else '源码运行'}", "sectionTitle", True)
+        self.version = label(f"版本 {info['version']} · {'便携版' if info['distribution'] == 'packaged' else '源码运行'}", "sectionTitle", True)
         product.body.addWidget(self.version)
         self.build = label("构建 " + info["commit"][:12] + (" · 含未提交改动" if info["dirty"] else ""), "muted", True)
         product.body.addWidget(self.build)
-        product.body.addWidget(label("Windows 用户态 CPU 调度工具。每次启动只观察，应用与恢复均需明确操作。", "body", True))
-        product.body.addWidget(label("当前提供手动检查更新入口，需要私有仓库访问权限。没有自动更新器，程序尚未签名。", "muted", True))
+        product.body.addWidget(label("用于调整 Windows 用户态进程的 CPU 调度。启动后先观察，由你选择何时应用或恢复设置。", "body", True))
+        product.body.addWidget(label("可在私有仓库的发行页面查看新版本，需要仓库访问权限。程序不会自动更新，目前也没有代码签名。", "muted", True))
         links = QHBoxLayout()
         for title, url in (("查看发行版本", "https://github.com/chenlaoc/ace-scheduler/releases"),
                            ("反馈问题", "https://github.com/chenlaoc/ace-scheduler/issues")):
@@ -50,4 +50,4 @@ class AboutPage(Page):
 
     def open_url(self, url):
         if not QDesktopServices.openUrl(url):
-            QMessageBox.warning(self, "无法打开", "未能打开此入口，请检查默认浏览器或本地文件关联。")
+            QMessageBox.warning(self, "无法打开", "无法打开页面或文件夹，请检查默认浏览器和文件关联设置。")

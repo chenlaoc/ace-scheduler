@@ -39,7 +39,7 @@ class PolicyPage(Page):
         self.selected = {rule.key for rule in owner.config.rules if rule.enabled}
         self.controls = {}
         self.pending_keys = ()
-        self.message = "编辑后统一保存或应用。"
+        self.message = "改好参数后，保存或应用勾选的规则。"
         card = GlassCard()
         card.body.setContentsMargins(18, 18, 18, 18)
         card.body.setSpacing(12)
@@ -95,7 +95,7 @@ class PolicyPage(Page):
         for index, width in enumerate((190, 96, 104, 108, 64, 76, 62)):
             self.table.setColumnWidth(index, width)
         card.body.addWidget(self.table)
-        card.body.addWidget(label("左侧勾选决定批量范围；右侧「监控」决定规则是否启用。各行参数可分别调整，最后一起应用。", "muted", True))
+        card.body.addWidget(label("勾选左侧的进程后，可一起保存或应用。右侧“监控”开关控制规则是否启用，每行参数也可以单独修改。", "muted", True))
         management = QHBoxLayout()
         self.add_button = QPushButton("＋ 添加进程")
         self.add_button.clicked.connect(self.add_rule)
@@ -128,7 +128,7 @@ class PolicyPage(Page):
         self.stop_button.setToolTip("停止后续自动应用，当前调度值保留")
         self.stop_button.clicked.connect(lambda: self.run_command("stop", self.selected_keys()))
         self.restore_button = QPushButton("恢复勾选规则")
-        self.restore_button.setToolTip("恢复勾选规则在本会话修改前的值，并停止自动应用")
+        self.restore_button.setToolTip("恢复勾选规则记录的原设置，并停止后续自动应用")
         self.restore_button.clicked.connect(lambda: self.run_command("restore", self.selected_keys()))
         self.discard_button = QPushButton("撤销勾选的编辑")
         self.discard_button.clicked.connect(self.discard_selected)
@@ -342,7 +342,7 @@ class PolicyPage(Page):
 
     def command_done(self):
         self.pending_keys = ()
-        self.message = "批量处理完成 · 各实例的实际结果见运行概览和日志。"
+        self.message = "已处理本次请求，请到“运行概览”或日志查看各进程的结果。"
         self.refresh_status()
 
     def refresh_status(self):
@@ -364,7 +364,7 @@ class PolicyPage(Page):
         if len(keys) != active:
             summary += f" · {len(keys) - active} 条停用，应用时跳过"
         if self.drafts.keys() - self.selected:
-            summary += "\n含未勾选的编辑，本次将保留。"
+            summary += "\n未勾选的编辑会保留，暂不保存或应用。"
         if self.message:
             summary += "\n" + self.message
         self.summary.setText(summary)

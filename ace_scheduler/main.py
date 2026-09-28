@@ -43,9 +43,9 @@ def main() -> int:
     apply_palette(app)
     read_only = args.monitor_only or bool(args.smoke_test)
     admin = is_admin()
-    warning = "" if read_only or admin else "普通权限 · 可以观察和编辑；需要写入时再请求管理员权限。"
+    warning = "" if read_only or admin else "可直接查看数据和编辑规则，修改进程设置时会申请管理员权限。"
     if args.handoff and (read_only or not admin):
-        QMessageBox.warning(None, APP_NAME, "接管需要同一用户的管理员权限。原窗口仍保留。")
+        QMessageBox.warning(None, APP_NAME, "请使用当前 Windows 用户的管理员权限。原窗口仍会保留。")
         return 1
     try:
         data = args.smoke_test.resolve() if args.smoke_test else data_directory()
@@ -76,7 +76,7 @@ def main() -> int:
         return 1
     if window:
         window.start_monitor()
-        warning = "已取得管理员权限，编辑已保留。当前只观察，请再次点击所需操作。"
+        warning = "已获得管理员权限，之前的编辑都已保留。当前只观察，请再次点击要执行的操作。"
     else:
         window = MainWindow(config, manager, read_only, enable_tray=not bool(args.smoke_test), write_enabled=admin)
     instance = None

@@ -41,7 +41,7 @@ class OverviewPage(Page):
         processes.body.addWidget(owner.table)
         details.toggled.connect(owner.table.set_detailed)
         details.toggled.connect(lambda value: details.setText("收起扩展指标" if value else "显示全部指标"))
-        self.empty = label("还没有发现匹配进程。启动游戏后，数据会自动出现在这里。", "muted", True)
+        self.empty = label("还没有找到匹配的进程。游戏或目标程序启动后，数据会显示在这里。", "muted", True)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.setMinimumHeight(85)
         processes.body.addWidget(self.empty)
@@ -70,7 +70,7 @@ class OverviewPage(Page):
             self.details[key] = value
         details.body.addLayout(info)
         self.body.addWidget(details)
-        self.body.addWidget(label("统计来自所选进程。进程 I/O 不等同于 SSD 物理读取。", "muted"))
+        self.body.addWidget(label("数据来自所选进程，其中的 I/O 不能作为 SSD 实际读取量。", "muted"))
         self.body.addStretch()
 
     def resizeEvent(self, event):

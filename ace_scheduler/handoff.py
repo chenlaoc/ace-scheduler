@@ -114,7 +114,7 @@ class ElevationHandoff(QObject):
         if window.pending_commands or window.pending_close or window.shutting_down or window.handoff_waiting:
             return
         if not self.transfer.tryLock(0):
-            window.banner.setText("另一个权限接管正在进行，请稍后再试。")
+            window.banner.setText("另一个窗口正在申请管理员权限，请稍后再试。")
             return
         self.files = HandoffFiles(self.directory, secrets.token_hex(32))
         self.released = self.stopping = False
@@ -122,7 +122,7 @@ class ElevationHandoff(QObject):
         self.had_worker = bool(window.thread and window.thread.isRunning())
         window.handoff_waiting = True
         window.setEnabled(False)
-        window.banner.setText("正在请求管理员权限；取消将保留此窗口和全部编辑。")
+        window.banner.setText("正在申请管理员权限。取消后会回到这个窗口，所有编辑都会保留。")
         try:
             config = window.config.to_dict()
             config["geometry"] = bytes(window.saveGeometry().toBase64()).decode("ascii")
@@ -151,7 +151,7 @@ class ElevationHandoff(QObject):
                 self.window.close()
                 return
             if time.monotonic() > self.deadline:
-                self.fail("提权接管超时；原窗口及草稿已保留。")
+                self.fail("管理员窗口未及时就绪，已保留原窗口和草稿。")
                 return
             if not self.stopping and self.files.path("ready").exists():
                 check_identity(self.files.read("ready"))
@@ -161,7 +161,7 @@ class ElevationHandoff(QObject):
                 else:
                     self.release()
         except Exception as exc:
-            self.fail("提权接管失败：" + str(exc))
+            self.fail("无法切换到管理员窗口：" + str(exc))
 
     @Slot()
     def release(self):
