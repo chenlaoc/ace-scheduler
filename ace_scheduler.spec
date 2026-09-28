@@ -58,7 +58,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=os.environ.get('ACE_SCHEDULER_CONSOLE') == '1',
-    # Elevation is requested only at explicit write actions; startup remains ordinary.
+    # main requests elevation at normal startup; keep explicit read-only CLI modes unelevated.
     uac_admin=False,
 )
 collect = COLLECT(exe, analysis.binaries, analysis.datas,

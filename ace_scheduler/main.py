@@ -18,6 +18,7 @@ def main() -> int:
     parser.add_argument("--monitor-only", action="store_true", help="只读监控；不请求 UAC，不允许修改调度")
     parser.add_argument("--smoke-test", type=Path, help="开发验证：只读启动，输出截图/JSON 并自动退出")
     parser.add_argument("--handoff", help=argparse.SUPPRESS)
+    parser.add_argument("--elevated-start", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.version_info < (3, 11):
         print("ACE Scheduler requires Windows and 64-bit Python 3.11+.")
@@ -29,7 +30,7 @@ def main() -> int:
     from ace_scheduler.config.config_manager import ConfigManager, data_directory
     from ace_scheduler.config.models import AppConfig
     from ace_scheduler.ui.main_window import MainWindow
-    from ace_scheduler.windows.elevation import is_admin
+    from ace_scheduler.windows.elevation import is_admin, request_elevation
     from ace_scheduler.branding import APP_NAME, DATA_NAMESPACE, app_icon
     from ace_scheduler.instance import InstanceServer, activate_existing
     from ace_scheduler.handoff import ElevationHandoff, prepare_child
@@ -43,13 +44,28 @@ def main() -> int:
     apply_palette(app)
     read_only = args.monitor_only or bool(args.smoke_test)
     admin = is_admin()
-    warning = "" if read_only or admin else "可直接查看数据和编辑规则，修改进程设置时会申请管理员权限。"
+    warning = ""
     if args.handoff and (read_only or not admin):
         QMessageBox.warning(None, APP_NAME, "请使用当前 Windows 用户的管理员权限。原窗口仍会保留。")
         return 1
     try:
         data = args.smoke_test.resolve() if args.smoke_test else data_directory()
         data.mkdir(parents=True, exist_ok=True)
+        if not read_only and not admin and not args.handoff:
+            # Activate before requesting UAC. Never hold the instance lock while
+            # starting the elevated child, and never create an ordinary editor.
+            if activate_existing(data):
+                return 0
+            if args.elevated_start:
+                QMessageBox.critical(None, APP_NAME, "未能获得管理员权限。请重新启动程序，或使用 --monitor-only 只读模式。")
+                return 1
+            try:
+                request_elevation(["--elevated-start"])
+            except OSError as exc:
+                if getattr(exc, "winerror", None) != 1223:
+                    QMessageBox.critical(None, "无法启动管理员窗口", str(exc))
+                return 1
+            return 0
         lock = QLockFile(str(data / "instance.lock"))
         lock.setStaleLockTime(0)
         transfer_guard = QLockFile(str(data / "transfer.lock"))

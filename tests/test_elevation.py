@@ -225,39 +225,60 @@ def test_failed_handoff_after_release_restarts_only_source_observer(app, tmp_pat
         lock.unlock()
 
 
-def test_ordinary_main_starts_without_uac_in_isolated_profile(tmp_path):
-    script = '''
-import json, sys
+@pytest.mark.parametrize("mode", ["normal", "cancel", "failure", "guard", "existing", "admin", "readonly", "smoke", "version"])
+def test_startup_permissions_in_isolated_process(tmp_path, mode):
+    script = r''' 
+import ctypes, json, sys
 from pathlib import Path
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from ace_scheduler.windows import elevation
-elevation.is_admin = lambda: False
-def forbidden(*args):
-    raise AssertionError("Startup must never ask for UAC")
-elevation.request_elevation = forbidden
+from ace_scheduler import instance
+mode, output = sys.argv[1:]
+report = {"requests": [], "dialogs": []}
+elevation.is_admin = lambda: mode == "admin"
+instance.activate_existing = lambda _: mode == "existing"
+def launch(args):
+    report["requests"].append(args)
+    if mode in ("cancel", "failure"):
+        raise ctypes.WinError(1223 if mode == "cancel" else 5)
+elevation.request_elevation = launch
+QMessageBox.critical = lambda *args: report["dialogs"].append(args[1])
 original = QApplication.exec
 def execute(app):
     def inspect():
         from ace_scheduler.ui.main_window import MainWindow
         window = next(w for w in app.topLevelWidgets() if isinstance(w, MainWindow))
-        Path(output).write_text(json.dumps({"readonly": window.read_only,
-            "writes": window.write_enabled, "armed": list(window.armed),
-            "ready": window.topology is not None}))
+        report.update(readonly=window.read_only, writes=window.write_enabled,
+                      armed=list(window.armed), ready=window.topology is not None)
         window.request_exit()
     QTimer.singleShot(700, inspect)
     QTimer.singleShot(8000, app.quit)
     return original()
 QApplication.exec = execute
 from ace_scheduler.main import main
-output = sys.argv[1]
-# main's parser must see ordinary startup arguments only.
-sys.argv = ["ace_scheduler"]
-raise SystemExit(main())
+sys.argv = ["ace_scheduler"] + ({"guard": ["--elevated-start"], "readonly": ["--monitor-only"],
+    "version": ["--version"], "smoke": ["--smoke-test", str(Path(output).parent / "smoke")]}.get(mode, []))
+try:
+    report["exit"] = main()
+except SystemExit as exc:
+    report["exit"] = exc.code
+Path(output).write_text(json.dumps(report))
 '''
-    output = tmp_path / "normal.json"
+    output = tmp_path / "startup.json"
     env = dict(os.environ, APPDATA=str(tmp_path), QT_QPA_PLATFORM="offscreen")
-    result = subprocess.run([sys.executable, "-c", script, str(output)], env=env, capture_output=True,
-                            timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    result = subprocess.run([sys.executable, "-c", script, mode, str(output)], env=env,
+                            capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
     assert result.returncode == 0, result.stderr.decode(errors="replace")
-    assert json.loads(output.read_text()) == {"readonly": False, "writes": False, "armed": [], "ready": True}
+    report = json.loads(output.read_text())
+    assert len(report["requests"]) == int(mode in ("normal", "cancel", "failure"))
+    if report["requests"]:
+        assert report["requests"] == [["--elevated-start"]]
+    assert bool(report["dialogs"]) == (mode in ("failure", "guard"))
+    assert report["exit"] == int(mode in ("cancel", "failure", "guard"))
+    if mode in ("admin", "readonly", "smoke"):
+        assert report["ready"] and report["armed"] == []
+        assert report["writes"] == (mode == "admin")
+        assert report["readonly"] == (mode != "admin")
+    else:
+        assert "ready" not in report  # No ordinary window or worker before UAC.

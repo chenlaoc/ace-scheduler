@@ -25,4 +25,4 @@ def request_elevation(arguments=None) -> None:
         directory = str(Path(__file__).resolve().parents[2])
     result = shell.ShellExecuteW(None, "runas", sys.executable, subprocess.list2cmdline(arguments), directory, 1)
     if result <= 32:
-        raise OSError(f"UAC 提权取消或失败（ShellExecuteW={result}）")
+        raise ctypes.WinError(ctypes.get_last_error() or result)
