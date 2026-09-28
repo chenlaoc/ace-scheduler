@@ -45,8 +45,9 @@ class InstanceServer(QObject):
             connection.socket.abort()
         self.server.close()
         try:
-            self.path.unlink(missing_ok=True)
-        except OSError:
+            if json.loads(self.path.read_text(encoding="utf-8")).get("token") == self.token:
+                self.path.unlink(missing_ok=True)
+        except (OSError, ValueError):
             pass
 
 

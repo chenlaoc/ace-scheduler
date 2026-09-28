@@ -7,6 +7,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import struct
 import sys
+import psutil
 
 from ace_scheduler import __version__
 
@@ -16,6 +17,7 @@ def main() -> int:
     parser.add_argument("--version", action="version", version=f"ACE Scheduler {__version__}")
     parser.add_argument("--monitor-only", action="store_true", help="只读监控；不请求 UAC，不允许修改调度")
     parser.add_argument("--smoke-test", type=Path, help="开发验证：只读启动，输出截图/JSON 并自动退出")
+    parser.add_argument("--handoff", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if sys.platform != "win32" or struct.calcsize("P") != 8 or sys.version_info < (3, 11):
         print("ACE Scheduler requires Windows and 64-bit Python 3.11+.")
@@ -27,9 +29,10 @@ def main() -> int:
     from ace_scheduler.config.config_manager import ConfigManager, data_directory
     from ace_scheduler.config.models import AppConfig
     from ace_scheduler.ui.main_window import MainWindow
-    from ace_scheduler.windows.elevation import is_admin, request_elevation
+    from ace_scheduler.windows.elevation import is_admin
     from ace_scheduler.branding import APP_NAME, DATA_NAMESPACE, app_icon
     from ace_scheduler.instance import InstanceServer, activate_existing
+    from ace_scheduler.handoff import ElevationHandoff, prepare_child
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
@@ -38,40 +41,52 @@ def main() -> int:
     app.setWindowIcon(app_icon())
     apply_palette(app)
     read_only = args.monitor_only or bool(args.smoke_test)
-    warning = ""
-    if not read_only and not is_admin():
-        try:
-            request_elevation()
-            return 0
-        except OSError as exc:
-            warning = str(exc) + "；本次进入只读监控模式。"
-            read_only = True
+    admin = is_admin()
+    warning = "" if read_only or admin else "普通权限 · 可以观察和编辑；需要写入时再请求管理员权限。"
+    if args.handoff and (read_only or not admin):
+        QMessageBox.warning(None, APP_NAME, "接管需要同一用户的管理员权限。原窗口仍保留。")
+        return 1
     try:
         data = args.smoke_test.resolve() if args.smoke_test else data_directory()
         data.mkdir(parents=True, exist_ok=True)
         lock = QLockFile(str(data / "instance.lock"))
         lock.setStaleLockTime(0)
-        if not lock.tryLock(0):
+        transfer_guard = QLockFile(str(data / "transfer.lock"))
+        transfer_guard.setStaleLockTime(0)
+        if not args.handoff and (not transfer_guard.tryLock(0) or not lock.tryLock(0)):
             if activate_existing(data):
                 return 0
             QMessageBox.information(None, APP_NAME, "已有实例正在运行，或配置目录被锁定。")
             return 1
+        transfer_guard.unlock()
+        manager = ConfigManager(data / "config.json")
+        window = None
+        if args.handoff:
+            window = prepare_child(data, args.handoff, lock, app,
+                                   lambda config: MainWindow(config, manager, start_worker=False,
+                                                             enable_tray=True, write_enabled=True))
         handler = RotatingFileHandler(data / "scheduler.log", maxBytes=512_000, backupCount=2, encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         logging.getLogger("ace_scheduler").addHandler(handler)
         logging.getLogger("ace_scheduler").setLevel(logging.INFO)
-        manager = ConfigManager(data / "config.json")
-        config, config_warning = manager.load() if not args.smoke_test else (AppConfig(), "")
-    except OSError as exc:
+        config, config_warning = (window.config, "") if window else manager.load() if not args.smoke_test else (AppConfig(), "")
+    except (OSError, ValueError, KeyError, TypeError, psutil.Error) as exc:
         QMessageBox.critical(None, "无法初始化配置目录", str(exc))
         return 1
-    window = MainWindow(config, manager, read_only, enable_tray=not bool(args.smoke_test))
+    if window:
+        window.start_monitor()
+        warning = "已取得管理员权限，编辑已保留。当前只观察，请再次点击所需操作。"
+    else:
+        window = MainWindow(config, manager, read_only, enable_tray=not bool(args.smoke_test), write_enabled=admin)
     instance = None
     try:
         instance = InstanceServer(data, app)
         instance.activated.connect(window.activate_window)
     except OSError as exc:
         window.log.appendPlainText("已有实例唤醒服务不可用：" + str(exc))
+    handoff = ElevationHandoff(window, lock, instance)
+    if not read_only and not admin:
+        window.elevation_request = handoff.start
     window.show()
     if warning or config_warning:
         window.log.appendPlainText("\n".join(filter(None, (warning, config_warning))))
@@ -102,6 +117,8 @@ def main() -> int:
     code = app.exec()
     if instance:
         instance.close()
+    if handoff.instance and handoff.instance is not instance:
+        handoff.instance.close()
     handler.close()
     lock.unlock()
     return code

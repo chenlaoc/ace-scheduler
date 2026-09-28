@@ -310,6 +310,8 @@ class PolicyPage(Page):
         except ValueError as exc:
             QMessageBox.warning(self, "CPU 选择无效", self.rule(key).name + "：" + str(exc))
             return
+        if apply and not self.owner.ensure_write_access():
+            return
         candidate = copy.deepcopy(self.owner.config)
         candidate.rules = [self.rule(rule.key) if rule.key in keys else rule for rule in candidate.rules]
         if not self.save_config(candidate):
@@ -327,6 +329,8 @@ class PolicyPage(Page):
     def run_command(self, kind, keys):
         if not keys or self.owner.read_only or self.owner.pending_commands or not self.owner.topology:
             return
+        if kind != "stop" and not self.owner.ensure_write_access():
+            return
         self.pending_keys = tuple(keys)
         self.owner.pending_commands += 1
         verb = {"apply": "应用", "stop": "停止", "restore": "恢复"}[kind]
@@ -343,7 +347,7 @@ class PolicyPage(Page):
 
     def refresh_status(self):
         keys = self.selected_keys()
-        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down)
+        pending = bool(self.owner.pending_commands or self.owner.pending_close or self.owner.shutting_down or self.owner.handoff_waiting)
         if hasattr(self.owner, "restore_all_button"):
             self.owner.restore_all_button.setEnabled(bool(self.owner.topology and not self.owner.read_only and not pending))
             self.owner.monitor_interval.setEnabled(not pending)

@@ -33,12 +33,17 @@ class MainWindow(FramelessMainWindow):
     stop_requested = Signal()
     force_restore_requested = Signal()
     abandon_requested = Signal()
+    suspend_requested = Signal()
+    worker_stopped = Signal()
 
-    def __init__(self, config, manager, read_only=False, start_worker=True, enable_tray=False):
+    def __init__(self, config, manager, read_only=False, start_worker=True, enable_tray=False, write_enabled=True):
         super().__init__()
         self.config = config
         self.manager = manager
         self.read_only = read_only
+        self.write_enabled = write_enabled and not read_only
+        self.elevation_request = None
+        self.handoff_waiting = False
         self.topology = None
         self.history = History()
         self.restore_count = 0
@@ -67,29 +72,33 @@ class MainWindow(FramelessMainWindow):
         if config.geometry:
             self.restoreGeometry(QByteArray.fromBase64(config.geometry.encode("ascii", errors="ignore")))
         if start_worker:
-            self.thread = QThread(self)
-            self.worker = MonitorWorker(copy.deepcopy(config), manager.path.with_name("recovery.json"), read_only)
-            self.worker.moveToThread(self.thread)
-            self.thread.started.connect(self.worker.start)
-            self.worker.ready.connect(self.on_ready)
-            self.worker.snapshot.connect(self.on_snapshot)
-            self.worker.log_line.connect(self.log.appendPlainText)
-            self.worker.applied.connect(self.on_applied)
-            self.worker.restore_done.connect(self.on_restore_done)
-            self.worker.command_done.connect(self.on_command_done)
-            self.config_changed.connect(self.worker.configure)
-            self.apply_many_requested.connect(self.worker.apply_rules)
-            self.stop_many_requested.connect(self.worker.stop_rules)
-            self.restore_many_requested.connect(self.worker.restore_rules)
-            self.restore_requested.connect(self.worker.restore)
-            self.stop_requested.connect(self.worker.finish_session)
-            self.force_restore_requested.connect(self.worker.force_restore)
-            self.abandon_requested.connect(self.worker.abandon_recovery)
-            self.worker.recovery_notice.connect(self.on_recovery_notice)
-            self.worker.finish_failed.connect(self.on_finish_failed)
-            self.thread.finished.connect(self.worker.deleteLater)
-            self.thread.finished.connect(self._thread_finished)
-            self.thread.start()
+            self.start_monitor()
+
+    def start_monitor(self):
+        self.thread = QThread(self)
+        self.worker = MonitorWorker(copy.deepcopy(self.config), self.manager.path.with_name("recovery.json"), not self.write_enabled)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.start)
+        self.worker.ready.connect(self.on_ready)
+        self.worker.snapshot.connect(self.on_snapshot)
+        self.worker.log_line.connect(self.log.appendPlainText)
+        self.worker.applied.connect(self.on_applied)
+        self.worker.restore_done.connect(self.on_restore_done)
+        self.worker.command_done.connect(self.on_command_done)
+        self.config_changed.connect(self.worker.configure)
+        self.apply_many_requested.connect(self.worker.apply_rules)
+        self.stop_many_requested.connect(self.worker.stop_rules)
+        self.restore_many_requested.connect(self.worker.restore_rules)
+        self.restore_requested.connect(self.worker.restore)
+        self.stop_requested.connect(self.worker.finish_session)
+        self.suspend_requested.connect(self.worker.stop)
+        self.force_restore_requested.connect(self.worker.force_restore)
+        self.abandon_requested.connect(self.worker.abandon_recovery)
+        self.worker.recovery_notice.connect(self.on_recovery_notice)
+        self.worker.finish_failed.connect(self.on_finish_failed)
+        self.thread.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self._thread_finished)
+        self.thread.start()
 
     def _build(self):
         root = Backdrop()
@@ -270,8 +279,21 @@ class MainWindow(FramelessMainWindow):
         if self.armed:
             self.policy_page.run_command("stop", tuple(self.armed))
 
+    def ensure_write_access(self):
+        if self.read_only or self.handoff_waiting:
+            return False
+        if self.write_enabled:
+            return True
+        if self.elevation_request:
+            self.elevation_request()
+        else:
+            self.banner.setText("调度写入需要管理员权限；请以管理员身份重新打开。")
+        return False
+
     def request_restore_all(self):
         if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
+            return
+        if not self.ensure_write_access():
             return
         self.pending_restore = True
         self.pending_commands += 1
@@ -294,6 +316,8 @@ class MainWindow(FramelessMainWindow):
 
     def resolve_recovery(self, force=False):
         if self.read_only or not self.topology or self.pending_commands or self.pending_close or self.shutting_down:
+            return
+        if not self.ensure_write_access():
             return
         message = ("将对仍属于原实例的记录恢复原值，包括被外部修改或写入未确认的字段。确认覆盖？" if force else
                    "将停止全部规则、保留当前调度值，并归档所有恢复记录（包括损坏记录）。之后不能再用这些记录恢复。")
@@ -449,6 +473,9 @@ class MainWindow(FramelessMainWindow):
             self.close()
 
     def closeEvent(self, event):
+        if self.handoff_waiting:
+            event.ignore()
+            return
         if not self.allow_close and not self.explicit_exit and self.config.close_to_tray:
             if self.tray and self.tray.available():
                 event.ignore()
@@ -482,12 +509,16 @@ class MainWindow(FramelessMainWindow):
             finally:
                 self.close_dialog_active = False
             if box.clickedButton() == restore:
+                if not self.ensure_write_access():
+                    return
                 self.pending_close = True
                 self.policy_page.refresh_status()
                 self.restore_requested.emit(None)
                 return
             if box.clickedButton() != keep:
                 self.explicit_exit = False
+                return
+            if not self.ensure_write_access():
                 return
         self._shutdown()
 
@@ -504,5 +535,8 @@ class MainWindow(FramelessMainWindow):
 
     @Slot()
     def _thread_finished(self):
+        if self.handoff_waiting:
+            self.worker_stopped.emit()
+            return
         self.allow_close = True
         self.close()
