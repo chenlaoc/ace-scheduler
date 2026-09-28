@@ -99,6 +99,9 @@ def test_overview_metrics_toggle_preserves_monitoring(window, size):
             assert toggle.isChecked() is expanded
             for column in (3, 6, 7, 8, 9, 10):
                 assert window.table.isColumnHidden(column) is not expanded
+            if expanded:
+                assert window.table.columnWidth(0) >= 165
+                assert window.table.columnWidth(11) >= 230
             window.on_snapshot([ProcessRow(identity.name, identity.pid, identity,
                                            Metrics(sample, sample, 2, 3))], armed, 1)
             assert window.table.item(0, 2).text() == f"{sample:.2f}"
