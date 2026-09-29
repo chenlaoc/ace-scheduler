@@ -3,8 +3,9 @@ from __future__ import annotations
 import copy
 from dataclasses import asdict
 import time
+import sqlite3
 
-from PySide6.QtCore import QByteArray, QThread, Qt, Signal, Slot, QSize
+from PySide6.QtCore import QByteArray, QThread, Qt, Signal, Slot, QSize, QTimer
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QHBoxLayout,
                                QMessageBox,
                                QPushButton, QStackedWidget, QVBoxLayout, QWidget)
@@ -13,6 +14,11 @@ from ace_scheduler.config.models import ECO_MODES, PRIORITIES
 from ace_scheduler.branding import APP_NAME, app_icon
 from ace_scheduler.core.experiment import ACTIVE, STATE_LABELS, History, summary, save_session, export_csv
 from ace_scheduler.core.process_monitor import MonitorWorker
+from ace_scheduler.core.clock import ClockTracker
+from .disk_capture import DiskCapture
+from .frame_import import FrameImportDialog, describe_frames
+from .repeated_experiments import RepeatedExperimentsDialog
+from ace_scheduler.core.repeated_experiments import RepeatedStudy
 from .process_table import number
 from .components import Backdrop, icon, label
 from .theme import apply_palette
@@ -72,6 +78,13 @@ class MainWindow(FramelessMainWindow):
         self.resize(1280, 860)
         self.setMinimumSize(1040, 680)
         self._build()
+        self.disk_capture = DiskCapture(self)
+        self.disk_capture.packet.connect(self.on_disk_packet)
+        self.disk_capture.stopped.connect(self.on_disk_stopped)
+        self.clock_tracker = ClockTracker()
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(1000)
+        self.clock_timer.timeout.connect(self.record_clock)
         self.theme_controller.changed.connect(self.refresh_theme_icons)
         self.refresh_theme_icons(self.theme_controller.effective)
         if enable_tray:
@@ -83,6 +96,8 @@ class MainWindow(FramelessMainWindow):
             self.start_monitor()
 
     def start_monitor(self):
+        self.record_clock()
+        self.clock_timer.start()
         self.worker_failure = ""
         self.thread = QThread(self)
         self.worker = MonitorWorker(copy.deepcopy(self.config), self.manager.path.with_name("recovery.json"),
@@ -523,6 +538,7 @@ class MainWindow(FramelessMainWindow):
         self.experiment_identity = selected[1] if selected and selected[0] == "instance" else None
         session = self.current_experiment()
         identity = session.identity if session else self.experiment_identity
+        self.refresh_recording_details(session)
         page.begin_button.setEnabled(identity in live and not self.worker_failure)
         page.finish_button.setEnabled(bool(session and not session.imported and session.state in ACTIVE))
         page.remove_button.setEnabled(bool(session and (session.imported or session.state not in ACTIVE)))
@@ -573,6 +589,7 @@ class MainWindow(FramelessMainWindow):
         details += "\n基线实际值：" + " · ".join(f"{name} {setting(name, session.baseline_state.get(name))}" for name in ("priority", "affinity", "eco"))
         details += "\n目标文件版本：" + (session.context.get("target", {}).get("version") or "未能读取")
         names = {"apply": "应用", "next_apply": "再次应用", "restore": "恢复", "maintenance": "维护",
+                 "scene_marker": "场景标记", "clock_break": "时钟断点", "disk_stopped": "磁盘记录停止",
                  "observed_change": "设置变化", "process_ended": "实例结束", "sampling_reset": "采样重置",
                  "worker_failed": "后台失败", "rule_stopped": "规则停止", "manual_stop": "手动结束",
                  "sampling_changed": "采样配置变更", "counter_reset": "计数器回退", "recording_stopped": "停止记录",
@@ -592,12 +609,123 @@ class MainWindow(FramelessMainWindow):
         if identity is None:
             return
         page = self.experiment_page
+        if len(page.scene_notes.toPlainText()) > 4000:
+            QMessageBox.warning(self, "场景备注过长", "备注最多 4000 字，请缩短后再开始记录。")
+            return
         session = self.history.begin(identity, time.monotonic(), baseline_seconds=page.baseline.value(),
                                      transition_seconds=page.transition.value(), after_seconds=page.after.value())
         if session:
+            session.set_scene(page.scene_name.text(), page.scene_notes.toPlainText())
             self.selected_experiment = session.id
             page.filter.setCurrentIndex(0)
         self.refresh_experiment()
+
+    def record_clock(self):
+        self.history.clock_update(self.clock_tracker.sample())
+
+    def toggle_disk_capture(self, enabled):
+        if enabled:
+            self.experiment_page.disk_status.setText("正在探测物理磁盘…")
+            self.disk_capture.start()
+        else:
+            self.disk_capture.stop()
+
+    def select_disk(self, *_):
+        key = self.experiment_page.disk_picker.currentData()
+        self.history.selected_disk = key if key in self.history.disk_devices else None
+
+    def on_disk_packet(self, packet):
+        devices_changed = packet.get("devices") is not None and {d["id"]: d for d in packet["devices"]} != self.history.disk_devices
+        try:
+            self.history.disk_packet(packet)
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+            self.disk_capture.stop("磁盘记录失败：" + str(exc))
+            return
+        page = self.experiment_page
+        if devices_changed:
+            page.disk_picker.blockSignals(True)
+            page.disk_picker.clear()
+            page.disk_picker.addItem("选择设备（用于新会话）", None)
+            for device in self.history.disk_devices.values():
+                page.disk_picker.addItem(f"磁盘 {device['number']} · {device['name']} · {', '.join(device['volumes']) or '盘符未知'}", device["id"])
+            page.disk_picker.setCurrentIndex(max(0, page.disk_picker.findData(self.history.selected_disk)))
+            page.disk_picker.blockSignals(False)
+        page.disk_status.setText(f"正在记录 · {len(self.history.disk_devices)} 个设备 · {self.history.disk_store.count} 条 · 最近采集 {packet['cost_seconds'] * 1000:.1f} ms；选择仅用于新会话")
+        self.refresh_recording_details(self.current_experiment())
+
+    def on_disk_stopped(self, reason):
+        self.history.disk_stop(reason, time.monotonic())
+        self.history.disk_devices.clear()
+        page = self.experiment_page
+        page.disk_enabled.blockSignals(True)
+        page.disk_enabled.setChecked(False)
+        page.disk_enabled.blockSignals(False)
+        page.disk_picker.clear()
+        page.disk_status.setText(reason)
+        self.refresh_recording_details(self.current_experiment())
+
+    def save_scene(self):
+        session = self.current_experiment()
+        if session:
+            try:
+                session.set_scene(self.experiment_page.scene_name.text(), self.experiment_page.scene_notes.toPlainText())
+                self.experiment_page.clock_status.setText("场景信息已保存在会话中；退出前请保存 JSON。")
+            except ValueError as exc:
+                QMessageBox.warning(self, "无法保存场景", str(exc))
+
+    def mark_scene(self):
+        session = self.current_experiment()
+        if session:
+            try:
+                self.record_clock()
+                session.scene_marker(time.monotonic(), self.experiment_page.marker.currentText())
+                self.refresh_experiment()
+            except ValueError as exc:
+                QMessageBox.warning(self, "无法记录标记", str(exc))
+
+    def refresh_recording_details(self, session):
+        page = self.experiment_page
+        page.frame_import.setEnabled(bool(session and (session.imported or session.state not in ACTIVE)))
+        frame_key = session.id if session else "none"
+        if page.frame_session_id != frame_key:
+            page.frame_session_id = frame_key
+            page.frame_details.setPlainText(describe_frames(session))
+        key = session.id if session else None
+        if page.editing_session != key:
+            page.editing_session = key
+            page.scene_name.setText(session.scene_name if session else "")
+            page.scene_notes.setPlainText(session.scene_notes if session else "")
+        editable = not session or not session.imported
+        page.scene_name.setReadOnly(not editable)
+        page.scene_notes.setReadOnly(not editable)
+        page.scene_save.setEnabled(bool(session and editable))
+        page.marker_button.setEnabled(bool(session and editable and session.state in ACTIVE))
+        if session:
+            page.clock_status.setText(f"时钟锚点 {len(session.clock['anchors'])} · 断点 {len(session.clock['breaks'])} · " +
+                                     ("本机时钟配对；UTC 绝对准确度未测量" if session.clock["anchors"] else "只有固定 UTC 偏移，近似对齐"))
+        else:
+            page.clock_status.setText("场景标记只记录时间，不应用调度策略。")
+        if not session or not session.disk_selection:
+            page.disk_details.setPlainText("当前会话未选择磁盘。启用采集并选择设备后，开始新的基线记录。")
+            return
+        selection = session.disk_selection
+        device = selection["device"]
+        lines = [f"会话设备：{device['name']} · {', '.join(device.get('volumes', [])) or '盘符未知'}",
+                 "；".join(device.get("uncertainty", []))]
+        if selection.get("stop_reason"):
+            lines.append(selection["stop_reason"])
+        for phase, fields in session.disk_report().items():
+            lines.append("应用前" if phase == "before" else "应用后")
+            for field, title, scale, unit in (("read_B_s", "读取", 1e-6, "MB/s"), ("write_B_s", "写入", 1e-6, "MB/s"),
+                    ("read_iops", "读 IOPS", 1, "次/s"), ("write_iops", "写 IOPS", 1, "次/s"),
+                    ("read_latency_s", "读延迟", 1000, "ms/请求"), ("write_latency_s", "写延迟", 1000, "ms/请求"),
+                    ("queue_mean", "平均队列", 1, "请求")):
+                value = fields[field]
+                rendered = f"{value['mean'] * scale:.3f} {unit}" if value["mean"] is not None else "—"
+                lines.append(f"  {title} {rendered} · 有效覆盖 {value['coverage']:.0%}")
+            current = fields["queue_current"]
+            lines.append(f"  当前队列采样最大值 {current['instantaneous_max']} · {current['instantaneous_points']} 个瞬时点")
+        page.disk_details.setPlainText("\n".join(filter(None, lines)))
 
     def finish_experiment(self):
         session = self.current_experiment()
@@ -613,6 +741,36 @@ class MainWindow(FramelessMainWindow):
             self.selected_experiment = None
             self.refresh_experiment()
 
+    def show_repeated_experiments(self):
+        sessions = [s for s in self.history.sessions.values() if s.state not in ACTIVE]
+        try:
+            study = RepeatedStudy(sessions)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "无法创建多轮项目", str(exc))
+            return
+        dialog = RepeatedExperimentsDialog(study, self)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def import_frames(self):
+        session = self.current_experiment()
+        if not session:
+            return
+        dialog = FrameImportDialog(session, self)
+        if dialog.exec() != FrameImportDialog.DialogCode.Accepted:
+            dialog.deleteLater()
+            return
+        try:
+            clone = self.history.attach_frames(session, dialog.store, dialog.stream.currentData(), **dialog.options())
+            self.selected_experiment = clone.id
+            self.experiment_page.filter.setCurrentIndex(0)
+            self.refresh_experiment()
+        except (ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+            dialog.store.close()
+            QMessageBox.warning(self, "导入失败", str(exc))
+        finally:
+            dialog.deleteLater()
+
     def open_experiment(self):
         path, _ = QFileDialog.getOpenFileName(self, "打开实验快照", "", "JSON (*.json)")
         if not path:
@@ -622,7 +780,7 @@ class MainWindow(FramelessMainWindow):
             self.selected_experiment = session.id
             self.experiment_page.filter.setCurrentIndex(0)
             self.refresh_experiment()
-        except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, OverflowError, RecursionError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "打开失败", str(exc))
 
     def save_experiment(self):
@@ -642,7 +800,7 @@ class MainWindow(FramelessMainWindow):
         try:
             (export_csv if csv_format else save_session)(session, path)
             self.log.appendPlainText(time.strftime("%H:%M:%S ") + "已导出 " + path)
-        except (OSError, ValueError, OverflowError) as exc:
+        except (OSError, ValueError, OverflowError, sqlite3.Error) as exc:
             QMessageBox.warning(self, "导出失败", str(exc))
 
     @Slot(bool)
@@ -680,6 +838,8 @@ class MainWindow(FramelessMainWindow):
                 return
             self.banner.setText("系统托盘暂不可用，关闭窗口将进入退出流程。")
         if self.allow_close or self.thread is None:
+            self.clock_timer.stop()
+            self.disk_capture.close()
             if self.tray:
                 self.tray.close()
             event.accept()

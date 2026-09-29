@@ -164,7 +164,9 @@ def test_json_reopen_is_readonly_and_csv_contains_all_context_and_events(tmp_pat
 
 
 @pytest.mark.parametrize("corrupt", [
-    lambda d: d.update(schema=2),
+    lambda d: d.update(schema=4),
+    lambda d: d.update(session="invalid"),
+    lambda d: d.update(session=[]),
     lambda d: d["session"].update(after_end=float("nan")),
     lambda d: d["session"]["observations"][0]["metrics"].update(sample_seconds=-1),
     lambda d: d["session"]["events"][0].update(result=[]),
