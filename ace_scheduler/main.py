@@ -13,6 +13,9 @@ from ace_scheduler import __version__
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--disk-helper":
+        from ace_scheduler.disk_helper import run
+        return run(sys.argv[2])
     parser = argparse.ArgumentParser(description="ACE Scheduler")
     parser.add_argument("--version", action="version", version=f"ACE Scheduler {__version__}")
     parser.add_argument("--monitor-only", action="store_true", help="只读监控；不请求 UAC，不允许修改调度")

@@ -9,7 +9,7 @@
 
 <p align="center">
   <a href="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml"><img src="https://github.com/chenlaoc/ace-scheduler/actions/workflows/ci.yml/badge.svg" alt="Windows CI"></a>
-  <br>Windows x64 · Python 3.11+ · PySide6 · v1.6.0
+  <br>Windows x64 · Python 3.11+ · PySide6 · v1.7.0
 </p>
 
 <p align="center">
@@ -73,6 +73,8 @@ py -3.13 -m venv .venv
 ## 调度方式
 
 v1.6.0 支持按字段“不修改”：Priority 与 CPU 分配可单独不接管；EcoQoS 可选“不修改 / 系统管理 / 开启 / 显式关闭”。点击“预览勾选…”可以先核对草稿和本机 CPU ID，再决定是否应用。旧配置保留原语义迁移到 v2，首次保存前备份原文件。详见[单字段操作与迁移说明](docs/USER_GUIDE.md)。实验记录需在退出前手动保存 JSON，之后可重新打开复查。
+
+v1.7.0 新增可选物理磁盘记录、场景与时钟标记、PresentMon v2 离线导入及多轮配对汇总，内置合成测试示例。真实游戏收益、长时间运行、睡眠恢复与设备断开验证留待后续；功能和限制见[第四阶段记录](docs/STAGE_FOUR_PROGRESS.md)。
 
 | 预设 | Priority | CPU Affinity | EcoQoS |
 | --- | --- | --- | --- |

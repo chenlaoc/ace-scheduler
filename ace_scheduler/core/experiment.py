@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import copy
 import csv
@@ -17,6 +17,8 @@ import uuid
 from ace_scheduler import __version__
 from ace_scheduler.config.models import Policy, process_name
 from .process_metrics import Metrics, ProcessIdentity
+from .disk_recording import DiskStore, FIELDS as DISK_FIELDS, UNITS as DISK_UNITS, disk_statistics, validate_rows
+from .frame_recording import make_attachment, frame_report, portable_frames, restore_frames
 
 FIELDS = ("cpu_percent", "read_mbps", "write_mbps")
 STATE_LABELS = {"baseline": "采集基线", "awaiting_apply": "等待应用策略", "transition": "过渡期",
@@ -134,10 +136,56 @@ class ExperimentSession:
     events: list[dict] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     imported: bool = False
+    scene_name: str = ""
+    scene_notes: str = ""
+    clock: dict = field(default_factory=lambda: {"source": "legacy_fixed_utc_offset", "anchors": [], "breaks": []})
+    disk_selection: dict | None = None
+    frame_attachment: dict | None = None
 
     @property
     def samples(self):
-        return [Metrics(**o["metrics"]) for o in self.observations]
+        samples = [Metrics(**o["metrics"]) for o in self.observations]
+        for index, sample in enumerate(samples):
+            if any(sample.timestamp - (sample.sample_seconds or 0) < b["timestamp"] and sample.timestamp > b.get("started", b["timestamp"] - .000001)
+                   for b in self.clock["breaks"]):
+                samples[index] = replace(sample, cpu_percent=None, read_mbps=None, write_mbps=None, sample_seconds=None)
+        return samples
+
+    def set_scene(self, name, notes):
+        if self.imported:
+            raise ValueError("已打开的实验只读")
+        if not isinstance(name, str) or not isinstance(notes, str) or len(name) > 200 or len(notes) > 4000:
+            raise ValueError("场景名称最多 200 字，备注最多 4000 字")
+        self.scene_name, self.scene_notes = name, notes
+
+    def scene_marker(self, timestamp, label):
+        if self.imported or self.state not in ACTIVE:
+            raise ValueError("请选择正在记录的本机会话")
+        if not isinstance(label, str) or not label.strip() or len(label) > 200 or not math.isfinite(timestamp) or timestamp < self.started:
+            raise ValueError("场景标记无效")
+        self.event({"kind": "scene_marker", "timestamp": timestamp, "reason": label.strip()})
+
+    def disk_rows(self):
+        store = getattr(self, "_disk_store", None)
+        if not store or not self.disk_selection:
+            return []
+        cutoff = self.disk_selection.get("cutoff")
+        if self.ended is not None:
+            cutoff = min(cutoff, self.ended) if cutoff is not None else self.ended
+        rows = store.rows(self.disk_selection["device"]["id"], list(self.windows().values()), cutoff)
+        for row in rows:
+            if any(row["timestamp"] - (row["seconds"] or 0) < b["timestamp"] and row["timestamp"] > b.get("started", b["timestamp"] - .000001) for b in self.clock["breaks"]):
+                row["values"] = dict.fromkeys(DISK_FIELDS)
+                row["seconds"], row["gap"] = None, "clock_break"
+        return rows
+
+    def disk_report(self):
+        rows = self.disk_rows()
+        return {phase: {name: disk_statistics(rows, name, *window) for name in DISK_FIELDS}
+                for phase, window in self.windows().items() if phase != "transition"} if self.disk_selection else {}
+
+    def frame_report(self):
+        return frame_report(self)
 
     @property
     def before(self):
@@ -195,7 +243,10 @@ class ExperimentSession:
     def to_dict(self):
         data = asdict(self)
         data.pop("imported")
-        return {"schema": 1, "session": data, "statistics": self.report(),
+        return {"schema": 3, "session": data, "statistics": self.report(),
+                "frame_recording": portable_frames(self),
+                "disk_recording": {"rows": self.disk_rows(), "statistics": self.disk_report(), "units": DISK_UNITS,
+                                   "scope": "physical device total, not process-attributed"},
                 "times_utc_approx": {name: datetime.fromtimestamp(getattr(self, name) + self.utc_offset, timezone.utc).isoformat()
                                      if getattr(self, name) is not None else None
                                      for name in ("started", "baseline_end", "marker", "after_start", "after_end", "ended")},
@@ -211,6 +262,65 @@ class History:
         self.sessions: dict[str, ExperimentSession] = {}
         self.latest = {}
         self.warning = ""
+        self.disk_store = None
+        self.disk_devices = {}
+        self.selected_disk = None
+        self.last_clock = None
+
+    def disk_packet(self, packet):
+        if packet.get("devices") is not None:
+            devices = {d["id"]: plain(d) for d in packet["devices"]}
+            removed = set(self.disk_devices) - set(devices)
+            for key in removed:
+                self.disk_stop("磁盘枚举已变化，原选择失效；请重新选择并开始新会话", packet["timestamp"], key)
+            self.disk_devices = devices
+            if self.selected_disk not in devices:
+                self.selected_disk = None
+        if self.disk_store is None:
+            self.disk_store = DiskStore()
+        for row in packet["rows"]:
+            self.disk_store.append(row["device_id"], [row])
+
+    def disk_stop(self, reason, timestamp, device_id=None):
+        for session in self.sessions.values():
+            selection = session.disk_selection
+            if session.imported or session.state not in ACTIVE or not selection or selection.get("cutoff") is not None:
+                continue
+            if device_id is not None and selection["device"]["id"] != device_id:
+                continue
+            selection["cutoff"] = timestamp
+            selection["stop_reason"] = reason
+            session.event({"kind": "disk_stopped", "timestamp": timestamp, "reason": reason})
+        if device_id is None or self.selected_disk == device_id:
+            self.selected_disk = None
+
+    def clock_update(self, packet):
+        anchor = plain(packet["anchor"])
+        previous = self.last_clock
+        self.last_clock = anchor
+        for session in self.sessions.values():
+            if session.imported or session.state not in ACTIVE:
+                continue
+            if previous and anchor["monotonic"] <= previous["monotonic"]:
+                session.event({"kind": "clock_break", "timestamp": previous["monotonic"],
+                               "reason": "monotonic_reset", "observed_anchor": anchor})
+                session.finish(previous["monotonic"], "单调时钟回退；停止会话以避免跨时间轴连接")
+                continue
+            anchors = session.clock["anchors"]
+            reasons = packet["breaks"]
+            if reasons:
+                point = {"timestamp": anchor["monotonic"], "started": previous["monotonic"] if previous else anchor["monotonic"], "reasons": reasons}
+                if len(session.clock["breaks"]) < 256:
+                    session.clock["breaks"].append(point)
+                session.event({"kind": "clock_break", "timestamp": anchor["monotonic"], "reason": ", ".join(reasons)})
+                if "时钟或采样存在断点，请核对时间对齐" not in session.issues:
+                    session.issues.append("时钟或采样存在断点，请核对时间对齐")
+            if not anchors or reasons or anchor["monotonic"] - anchors[-1]["monotonic"] >= 30:
+                if len(anchors) < 256:
+                    anchors.append(copy.deepcopy(anchor))
+                    session.clock["source"] = "paired_local_clocks"
+                else:
+                    session.finish(anchor["monotonic"], "时钟锚点达到 256 条上限")
 
     @property
     def experiments(self):
@@ -232,6 +342,12 @@ class History:
                                     transition_seconds, after_seconds,
                                     time.time() - time.monotonic() if utc_offset is None else utc_offset)
         session.context = copy.deepcopy(self.contexts.get(identity, {"app_version": __version__}))
+        if self.last_clock:
+            session.clock = {"source": "paired_local_clocks", "anchors": [copy.deepcopy(self.last_clock)], "breaks": []}
+        if self.selected_disk in self.disk_devices:
+            session.disk_selection = {"device": copy.deepcopy(self.disk_devices[self.selected_disk]), "cutoff": None,
+                                      "selected_at": timestamp, "stop_reason": ""}
+            session._disk_store = self.disk_store
         self.sessions[session.id] = session
         self.latest[identity] = session.id
         self.warning = ""
@@ -377,20 +493,64 @@ class History:
             self.latest.pop(session.identity)
         self.warning = ""
 
+    def attach_frames(self, session, store, stream, **options):
+        """Create a read-only analysis copy, preserving the original experiment."""
+        if session.state in ACTIVE and not session.imported:
+            raise ValueError("请先结束记录再导入帧文件")
+        if len(self.sessions) >= 64:
+            raise ValueError("实验数量达到 64，请先保存并移除旧会话")
+        attachment = make_attachment(session, store, stream, **options)
+        stores = {id(s._frame_store): s._frame_store for s in self.sessions.values() if s.frame_attachment}
+        stores[id(store)] = store
+        if sum(s.count for s in stores.values()) > 300_000:
+            raise ValueError("本次运行帧附件达到 300000 条上限；请先保存并移除旧分析")
+        clone = copy.copy(session)
+        for name in ("context", "observations", "events", "issues", "baseline_state", "clock", "disk_selection"):
+            setattr(clone, name, copy.deepcopy(getattr(session, name)))
+        clone.id, clone.imported = uuid.uuid4().hex, True
+        clone.context["frame_analysis_source_session"] = session.context.get("frame_analysis_source_session", session.id)
+        clone.frame_attachment = plain(attachment)
+        clone._frame_store, clone._frame_stream = store, stream
+        self.sessions[clone.id] = clone
+        return clone
+
     def load(self, path):
         path = Path(path)
-        if path.stat().st_size > 8_000_000:
+        if path.stat().st_size > 24_000_000:
             raise ValueError("实验文件过大")
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as stream:
+            payload = stream.read(24_000_001)
+        if len(payload) > 24_000_000:
+            raise ValueError("实验文件过大")
+        data = json.loads(payload.decode("utf-8"))
         plain(data)
-        if not isinstance(data, dict) or type(data.get("schema")) is not int or data.get("schema") != 1:
+        if not isinstance(data, dict) or type(data.get("schema")) is not int or data.get("schema") not in (1, 2, 3):
             raise ValueError("实验文件版本不支持")
+        if data["schema"] == 1 and len(payload) > 8_000_000:
+            raise ValueError("旧版实验文件过大")
+        if not isinstance(data.get("session"), dict):
+            raise ValueError("实验会话容器无效")
         raw = copy.deepcopy(data["session"])
         identity = ProcessIdentity(**raw.pop("identity"))
         process_name(identity.name)
         if type(identity.pid) is not int or identity.pid <= 0 or not math.isfinite(identity.created) or identity.created <= 0:
             raise ValueError("实例身份无效")
         session = ExperimentSession(identity=identity, **raw)
+        if data["schema"] < 3 and (session.frame_attachment is not None or data.get("frame_recording") is not None):
+            raise ValueError("旧版会话不可包含帧附件")
+        if data["schema"] == 1:
+            session.clock = {"source": "legacy_fixed_utc_offset", "anchors": [], "breaks": []}
+            session.disk_selection = None
+        validate_extensions(session)
+        recording = data.get("disk_recording", {})
+        if not isinstance(recording, dict):
+            raise ValueError("磁盘记录容器无效")
+        disk_rows = recording.get("rows", []) if data["schema"] >= 2 else []
+        validate_rows(disk_rows)
+        if disk_rows and not session.disk_selection:
+            raise ValueError("磁盘数据缺少设备选择")
+        if disk_rows and any(row.get("device_id") != session.disk_selection["device"]["id"] for row in disk_rows):
+            raise ValueError("磁盘样本与所选设备不一致")
         if not isinstance(session.id, str) or len(session.id) != 32 or any(c not in "0123456789abcdef" for c in session.id):
             raise ValueError("实验 ID 无效")
         if session.state not in STATE_LABELS or not isinstance(session.baseline_verified, bool) or not isinstance(session.label, str):
@@ -448,15 +608,90 @@ class History:
                     validate_setting(op["field"], op.get(name))
         for stamp in [session.started, session.baseline_end, session.after_end or session.baseline_end] + [e["timestamp"] for e in session.events]:
             datetime.fromtimestamp(stamp + session.utc_offset, timezone.utc)
+        restore_frames(session, data.get("frame_recording"))
+        stores = {id(s._frame_store): s._frame_store for s in self.sessions.values() if s.frame_attachment}
+        if session.id not in self.sessions and sum(s.count for s in stores.values()) + (session.frame_attachment["stream"]["rows"] if session.frame_attachment else 0) > 300_000:
+            raise ValueError("本次运行帧附件达到 300000 条上限")
+        temporary_store = None
+        if disk_rows:
+            temporary_store = DiskStore()
+            try:
+                temporary_store.append(session.disk_selection["device"]["id"], disk_rows)
+                session._disk_store = temporary_store
+                if len(session.disk_rows()) != len(disk_rows):
+                    raise ValueError("磁盘数据超出会话窗口")
+            except Exception:
+                temporary_store.close()
+                raise
         if session.id in self.sessions:
             if self.sessions[session.id].to_dict() != session.to_dict():
+                if temporary_store:
+                    temporary_store.close()
                 raise ValueError("已存在同 ID 的不同实验；请先移除旧快照")
+            if temporary_store:
+                temporary_store.close()
             return self.sessions[session.id]
         if len(self.sessions) >= 64:
+            if temporary_store:
+                temporary_store.close()
             raise ValueError("实验数量达到 64，请先保存并移除旧会话")
         session.imported = True
         self.sessions[session.id] = session
         return session
+
+
+def validate_extensions(session):
+    if not isinstance(session.scene_name, str) or len(session.scene_name) > 200 or not isinstance(session.scene_notes, str) or len(session.scene_notes) > 4000:
+        raise ValueError("场景内容无效")
+    clock = session.clock
+    if not isinstance(clock, dict) or clock.get("source") not in ("legacy_fixed_utc_offset", "paired_local_clocks"):
+        raise ValueError("时钟来源无效")
+    for field in ("anchors", "breaks"):
+        if not isinstance(clock.get(field), list) or len(clock[field]) > 256:
+            raise ValueError("时钟记录数量无效")
+    if clock["source"] == "legacy_fixed_utc_offset" and (clock["anchors"] or clock["breaks"]):
+        raise ValueError("旧版时钟不可伪造精确锚点")
+    previous = -math.inf
+    for anchor in clock["anchors"]:
+        if not isinstance(anchor, dict):
+            raise ValueError("时钟锚点无效")
+        for key in ("monotonic", "utc_unix", "qpc", "qpc_frequency", "pairing_error_seconds"):
+            v = anchor.get(key)
+            if type(v) not in (int, float) or not math.isfinite(v) or v < 0:
+                raise ValueError("时钟锚点数值无效")
+        if anchor["qpc_frequency"] <= 0 or anchor["monotonic"] <= previous:
+            raise ValueError("时钟锚点顺序无效")
+        awake = anchor.get("awake_seconds")
+        if awake is not None and (type(awake) not in (int, float) or not math.isfinite(awake) or awake < 0):
+            raise ValueError("活动时钟无效")
+        previous = anchor["monotonic"]
+    for point in clock["breaks"]:
+        if not isinstance(point, dict) or type(point.get("timestamp")) not in (int, float) or not math.isfinite(point["timestamp"]):
+            raise ValueError("时钟断点无效")
+        if not isinstance(point.get("reasons"), list) or any(not isinstance(reason, str) for reason in point["reasons"]):
+            raise ValueError("时钟断点原因无效")
+        if type(point.get("started", point["timestamp"])) not in (int, float) or not math.isfinite(point.get("started", point["timestamp"])) or point.get("started", point["timestamp"]) > point["timestamp"]:
+            raise ValueError("时钟断点区间无效")
+    selection = session.disk_selection
+    if selection is not None:
+        if not isinstance(selection, dict) or not isinstance(selection.get("device"), dict):
+            raise ValueError("磁盘选择无效")
+        device = selection["device"]
+        if not isinstance(device.get("id"), str) or not device["id"] or len(device["id"]) > 128 or not isinstance(device.get("name"), str):
+            raise ValueError("磁盘身份无效")
+        if type(device.get("number")) is not int or device["number"] < 0 or not isinstance(device.get("instance"), str):
+            raise ValueError("磁盘编号无效")
+        for key in ("volumes", "uncertainty"):
+            if not isinstance(device.get(key), list) or len(device[key]) > 128 or any(not isinstance(v, str) for v in device[key]):
+                raise ValueError("磁盘映射信息无效")
+        if not isinstance(selection.get("stop_reason", ""), str):
+            raise ValueError("磁盘停止原因无效")
+        if len(json.dumps(selection, ensure_ascii=False)) > 16384:
+            raise ValueError("磁盘身份过大")
+        for field in ("selected_at", "cutoff"):
+            value = selection.get(field)
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                raise ValueError("磁盘选择时间无效")
 
 
 def atomic_write(path, write, *, encoding="utf-8"):
@@ -474,7 +709,11 @@ def atomic_write(path, write, *, encoding="utf-8"):
 
 
 def save_session(session, path):
-    atomic_write(path, lambda stream: json.dump(session.to_dict(), stream, ensure_ascii=False, indent=2, allow_nan=False))
+    def write(stream):
+        json.dump(session.to_dict(), stream, ensure_ascii=False, indent=2, allow_nan=False)
+        if stream.tell() > 24_000_000:
+            raise ValueError("实验超过 24 MB 保存上限，原文件保留；请导出 CSV")
+    atomic_write(path, write)
 
 
 def export_csv(session, path):
@@ -491,6 +730,9 @@ def export_csv(session, path):
         metadata = session.to_dict()
         metadata["session"].pop("observations")
         metadata["session"].pop("events")
+        disk_rows = metadata["disk_recording"].pop("rows")
+        frames = metadata.get("frame_recording")
+        frame_rows = frames.pop("rows") if frames else []
         writer.writerow({**base, "row_type": "metadata", "context_json": json.dumps(metadata, ensure_ascii=False)})
         for observation in session.observations:
             sample = Metrics(**observation["metrics"])
@@ -509,4 +751,10 @@ def export_csv(session, path):
             writer.writerow({**base, "row_type": "event", "phase": literal(event["kind"]),
                 "sample_utc_approx": datetime.fromtimestamp(event["timestamp"] + session.utc_offset, timezone.utc).isoformat(),
                 "event_json": json.dumps(event, ensure_ascii=False)})
+        for row in disk_rows:
+            writer.writerow({**base, "row_type": "disk_sample", "sample_seconds": row["seconds"],
+                             "sample_utc_approx": datetime.fromtimestamp(row["timestamp"] + session.utc_offset, timezone.utc).isoformat(),
+                             "event_json": json.dumps(row, ensure_ascii=False)})
+        for row in frame_rows:
+            writer.writerow({**base, "row_type": "frame_sample", "event_json": json.dumps(row, ensure_ascii=False)})
     atomic_write(path, write, encoding="utf-8-sig")
